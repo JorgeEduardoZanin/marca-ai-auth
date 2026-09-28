@@ -1,10 +1,5 @@
 package marca.ai.utils;
 
-/**
- * Dígito verificador do CPF. O schema delega esta checagem para a aplicação
- * (-- só dígitos, validados na aplicação), e o tipo char(11) do banco não
- * protege: ele aceita valor curto preenchendo com espaços.
- */
 public final class CpfValidation {
 
     private CpfValidation() {}

@@ -53,13 +53,11 @@ public record CreateUserRequest (
         if (dateOfBirth == null) errors.add(ValidationExceptionType.DATE_OF_BIRTH_CANNOT_BE_NULL_OR_EMPTY);
         if (isBlank(email)) errors.add(ValidationExceptionType.EMAIL_CANNOT_BE_NULL_OR_EMPTY);
         if (isBlank(password)) errors.add(ValidationExceptionType.PASSWORD_CANNOT_BE_NULL_OR_EMPTY);
+        if (isBlank(privacyPolicyVersion) || isBlank(termsOfUseVersion)) errors.add(ValidationExceptionType.TERMS_OF_USE_OR_PRIVACY_POLICY_IS_NULL);
 
         if (!privacyPolicy || !termsOfUse) errors.add(ValidationExceptionType.TERMS_AND_PRIVACY_POLICY_MUST_BE_ACCEPTED);
 
-
         if (!errors.isEmpty()) throw new ValidationException(errors);
-
-
     }
 
     public void validateContent () {

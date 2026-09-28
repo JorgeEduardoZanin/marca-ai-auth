@@ -13,6 +13,8 @@ import marca.ai.dto.request.CreateUserRequest;
 import marca.ai.dto.response.CreateUserResponse;
 import marca.ai.service.UserService;
 
+import java.util.UUID;
+
 @Path("/user")
 @ApplicationScoped
 public class UserController {
@@ -23,14 +25,16 @@ public class UserController {
         this.userService = userService;
     }
 
+    private record userResponse(UUID ID, String message, String totpUri){}
+
     @POST
     @Consumes(MediaType.APPLICATION_JSON)
     @Produces(MediaType.APPLICATION_JSON)
     public Uni<Response> createUser (HttpServerRequest httpRequest, CreateUserRequest request) {
 
         return userService.createUser(request, httpRequest.remoteAddress().hostAddress())
-                .map(id -> Response.status(Response.Status.CREATED)
-                        .entity(new CreateUserResponse(id, "Usuário criado com sucesso."))
+                .map(userResponse -> Response.status(Response.Status.CREATED)
+                        .entity(new userResponse(userResponse.id(), "Usuário criado com sucesso.", userResponse.totpUri()))
                         .build());
     }
 }

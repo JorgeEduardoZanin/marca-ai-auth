@@ -11,6 +11,7 @@ public enum ValidationExceptionType {
     TELEPHONE_CANNOT_BE_NULL_OR_EMPTY("Telefone não pode ser nulo ou vazio."),
     EMAIL_CANNOT_BE_NULL_OR_EMPTY("Email não pode ser nulo ou vazio."),
     PASSWORD_CANNOT_BE_NULL_OR_EMPTY("Senha não pode ser nula ou vazia."),
+    TERMS_OF_USE_OR_PRIVACY_POLICY_IS_NULL("Termo de uso e política de privacidade não podem ser nulos."),
 
     CPF_MUST_CONTAIN_ONLY_11_DIGITS("CPF deve conter exatamente 11 dígitos numéricos."),
     EMAIL_INVALID_FORMAT("E-mail inválido."),

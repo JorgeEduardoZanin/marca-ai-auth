@@ -22,17 +22,15 @@ public final class ExceptionMapper {
     private ExceptionMapper() {}
 
     public static RuntimeException fromPgException (PgException failure) {
-        Log.errorf("Erro desconhecido. erro=%s", failure.getMessage());
+
         if (ViolationCodes.UNIQUE.getCode().equals(failure.getSqlState())) {
-
-
             return switch (Constraints.from(failure.getConstraint())) {
                 case USER_CPF_KEY -> new BusinessRuleException(BusinessRuleExceptionType.CPF_ALREADY_REGISTERED);
                 case EMAIL_KEY    -> new BusinessRuleException(BusinessRuleExceptionType.EMAIL_ALREADY_REGISTERED);
                 case UNKNOWN      -> unknownInfrastructureError();
             };
         }
-
+        Log.errorf("Erro desconhecido. erro=%s", failure.getMessage());
         return unknownInfrastructureError();
     }
 

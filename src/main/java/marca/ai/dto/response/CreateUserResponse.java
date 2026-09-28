@@ -9,6 +9,6 @@ public record CreateUserResponse(
         @JsonProperty("id")
         UUID id,
 
-        @JsonProperty("message")
-        String message
+        @JsonProperty("totp_uri")
+        String totpUri
 ) {}

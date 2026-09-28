@@ -1,19 +1,29 @@
 package marca.ai.service;
 
+import com.eatthepath.otp.TimeBasedOneTimePasswordGenerator;
 import io.quarkus.elytron.security.common.BcryptUtil;
+import io.quarkus.logging.Log;
 import io.smallrye.mutiny.Uni;
 import io.smallrye.mutiny.infrastructure.Infrastructure;
 import io.vertx.mutiny.sqlclient.Pool;
 import io.vertx.pgclient.PgException;
 import io.vertx.sqlclient.TransactionPropagation;
-import jakarta.enterprise.context.ApplicationScoped;
-import jakarta.inject.Inject;
-import marca.ai.dto.request.CreateUserRequest;
-import marca.ai.exception.mapper.ExceptionMapper;
-import marca.ai.repository.CredentialRepository;
-import marca.ai.repository.PoliciesRepository;
-import marca.ai.repository.UserRepository;
 
+import jakarta.enterprise.context.ApplicationScoped;
+
+import jakarta.ws.rs.core.Response;
+import marca.ai.dto.request.CreateUserRequest;
+import marca.ai.dto.response.CreateUserResponse;
+import marca.ai.exception.InfrastructureException;
+import marca.ai.exception.mapper.ExceptionMapper;
+import marca.ai.exception.type.InfrastructureExceptionType;
+import marca.ai.repository.*;
+import marca.ai.utils.StringBuilderUtils;
+
+import javax.crypto.KeyGenerator;
+import javax.crypto.SecretKey;
+import java.security.NoSuchAlgorithmException;
+import java.util.Base64;
 import java.util.UUID;
 
 @ApplicationScoped
@@ -31,14 +41,25 @@ public class UserService {
 
     private final PoliciesRepository policiesRepository;
 
-    public UserService(Pool transactional, UserRepository userRepository, CredentialRepository credentialRepository, PoliciesRepository policiesRepository) {
+    private final UserRoleRepository userRoleRepository;
+
+    private final Aes256GcmService aes256GcmService;
+
+    private final AuthFactorRepository authFactorRepository;
+
+    private final TimeBasedOneTimePasswordGenerator totp =  new TimeBasedOneTimePasswordGenerator();
+
+    public UserService(Pool transactional, UserRepository userRepository, CredentialRepository credentialRepository, PoliciesRepository policiesRepository, UserRoleRepository userRoleRepository, Aes256GcmService aes256GcmService, AuthFactorRepository authFactorRepository) {
         this.transactional = transactional;
         this.userRepository = userRepository;
         this.credentialRepository = credentialRepository;
         this.policiesRepository = policiesRepository;
+        this.userRoleRepository = userRoleRepository;
+        this.aes256GcmService = aes256GcmService;
+        this.authFactorRepository = authFactorRepository;
     }
 
-    public Uni<UUID> createUser (CreateUserRequest request, String ip) {
+    public Uni<CreateUserResponse> createUser (CreateUserRequest request, String ip) {
 
         request.validate();
         request.validateContent();
@@ -53,8 +74,29 @@ public class UserService {
                  * manda um ROLLBACK.
                  */
                 .chain(encryptedPassword -> transactional.withTransaction(TransactionPropagation.CONTEXT, tx -> userRepository.insertUser(request)
-                        .chain(userId -> credentialRepository.insertCredential(request, userId, encryptedPassword).replaceWith(userId))
-                        .chain(userId -> policiesRepository.insertTermsAndPolicies(userId, request.privacyPolicyVersion(), request.termsOfUseVersion(), ip).replaceWith(userId))))
+                        .chain(userID -> credentialRepository.insertCredential(request, userID, encryptedPassword).replaceWith(userID))
+                        .chain( userID -> userRoleRepository.insertUserRole(userID).replaceWith(userID))
+                        .chain(userID -> policiesRepository.insertTermsAndPolicies(userID, request.privacyPolicyVersion(), request.termsOfUseVersion(), ip).replaceWith(userID))
+                        .chain(userID -> {
+
+                            byte[] secret;
+
+                            try {
+                                final KeyGenerator keyGenerator = KeyGenerator.getInstance(totp.getAlgorithm());
+                                keyGenerator.init(160);
+                                SecretKey secretKey = keyGenerator.generateKey();
+                                secret = secretKey.getEncoded();
+                            } catch (NoSuchAlgorithmException e) {
+                                Log.errorf("Erro ao gerar secret key do totp. erro=%s", e.getMessage());
+                                throw new InfrastructureException(InfrastructureExceptionType.UNKNOWN_INFRASTRUCTURE_ERROR, Response.Status.INTERNAL_SERVER_ERROR);
+                            }
+
+                            String totpUri = StringBuilderUtils.buildTotpUri(secret, request.email());
+
+                            return authFactorRepository.insertAuthFactor(userID, aes256GcmService.encrypt(Base64.getEncoder().encodeToString(secret), userID))
+                                    .replaceWith(new CreateUserResponse(userID, totpUri));
+
+                        })))
                 .onFailure(PgException.class).transform(ExceptionMapper::fromPgException);
     }
 
