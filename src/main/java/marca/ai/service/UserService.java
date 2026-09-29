@@ -88,12 +88,12 @@ public class UserService {
                                 secret = secretKey.getEncoded();
                             } catch (NoSuchAlgorithmException e) {
                                 Log.errorf("Erro ao gerar secret key do totp. erro=%s", e.getMessage());
-                                throw new InfrastructureException(InfrastructureExceptionType.UNKNOWN_INFRASTRUCTURE_ERROR, Response.Status.INTERNAL_SERVER_ERROR);
+                                return Uni.createFrom().failure(new InfrastructureException(InfrastructureExceptionType.UNKNOWN_INFRASTRUCTURE_ERROR, Response.Status.INTERNAL_SERVER_ERROR));
                             }
 
                             String totpUri = StringBuilderUtils.buildTotpUri(secret, request.email());
 
-                            return authFactorRepository.insertAuthFactor(userID, aes256GcmService.encrypt(Base64.getEncoder().encodeToString(secret), userID))
+                            return authFactorRepository.insertAuthFactor(userID, aes256GcmService.encrypt(Base64.getEncoder().encodeToString(secret), userID.toString()))
                                     .replaceWith(new CreateUserResponse(userID, totpUri));
 
                         })))

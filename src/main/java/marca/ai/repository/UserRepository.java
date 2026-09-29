@@ -36,9 +36,6 @@ public class UserRepository {
                 .addString(request.telephone())
                 .addLocalDate(request.dateOfBirth());
 
-        // CONTEXT: se ja existe transacao no contexto Vert.x, reaproveita a conexao
-        // dela; senao abre uma propria. Sem isto, pool.preparedQuery() pegaria
-        // outra conexao e comitaria sozinho, fora da transacao do service.
         return pool.withTransaction(TransactionPropagation.CONTEXT, connection ->
                 connection.preparedQuery(sql)
                         .execute(params)

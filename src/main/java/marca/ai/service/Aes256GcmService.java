@@ -1,7 +1,9 @@
 package marca.ai.service;
 
 import io.quarkus.logging.Log;
+import io.quarkus.runtime.StartupEvent;
 import jakarta.enterprise.context.ApplicationScoped;
+import jakarta.enterprise.event.Observes;
 import jakarta.ws.rs.core.Response;
 import marca.ai.exception.InfrastructureException;
 import marca.ai.exception.type.InfrastructureExceptionType;
@@ -17,7 +19,6 @@ import java.nio.charset.StandardCharsets;
 import java.security.GeneralSecurityException;
 import java.security.SecureRandom;
 import java.util.Base64;
-import java.util.UUID;
 
 @ApplicationScoped
 public class Aes256GcmService {
@@ -40,7 +41,7 @@ public class Aes256GcmService {
         this.secretKey = new SecretKeySpec(keyBytes, "AES");
     }
 
-    public String encrypt(String plainText, UUID userID) {
+    public String encrypt(String plainText, String AAD) {
 
         byte[] iv = new byte[IV_LENGTH];
         random.nextBytes(iv);
@@ -48,19 +49,19 @@ public class Aes256GcmService {
         try {
             Cipher cipher = Cipher.getInstance(ALGORITHM);
             cipher.init(Cipher.ENCRYPT_MODE, secretKey, new GCMParameterSpec(TAG_LENGTH_BITS, iv));
-            cipher.updateAAD(userID.toString().getBytes(StandardCharsets.UTF_8));
+            cipher.updateAAD(AAD.getBytes(StandardCharsets.UTF_8));
 
             byte[] cipherText = cipher.doFinal(plainText.getBytes(StandardCharsets.UTF_8));
             byte[] out = ByteBuffer.allocate(iv.length + cipherText.length).put(iv).put(cipherText).array();
 
             return VERSION_PREFIX + Base64.getEncoder().encodeToString(out);
         } catch (GeneralSecurityException e) {
-            Log.errorf("Erro ao criptografar segredo TOTP. erro=%s", e.getMessage());
+            Log.errorf("Erro ao criptografar. erro=%s", e.getMessage());
             throw new InfrastructureException(InfrastructureExceptionType.UNKNOWN_INFRASTRUCTURE_ERROR, Response.Status.INTERNAL_SERVER_ERROR);
         }
     }
 
-    public String decrypt (String stored, UUID userID) {
+    public String decrypt (String stored, String AAD) {
         if(!stored.startsWith(VERSION_PREFIX)) {
             Log.errorf("Versão de chave desconhecida.");
             throw new InfrastructureException(InfrastructureExceptionType.UNKNOWN_INFRASTRUCTURE_ERROR, Response.Status.INTERNAL_SERVER_ERROR);
@@ -75,14 +76,14 @@ public class Aes256GcmService {
 
             Cipher cipher = Cipher.getInstance(ALGORITHM);
             cipher.init(Cipher.DECRYPT_MODE, secretKey, new GCMParameterSpec(TAG_LENGTH_BITS, iv));
-            cipher.updateAAD(userID.toString().getBytes(StandardCharsets.UTF_8));
+            cipher.updateAAD(AAD.getBytes(StandardCharsets.UTF_8));
 
             return new String(cipher.doFinal(ciphertext), StandardCharsets.UTF_8);
         } catch (AEADBadTagException e) {
-            Log.errorf("Segredo TOTP adulterado TOTP ou chave/úsuario incorretos. erro=%s", e.getMessage());
+            Log.errorf("Dado adulterado ou chave/AAD incorretos. erro=%s", e.getMessage());
             throw new InfrastructureException(InfrastructureExceptionType.UNKNOWN_INFRASTRUCTURE_ERROR, Response.Status.INTERNAL_SERVER_ERROR);
         } catch (GeneralSecurityException e) {
-            Log.errorf("Falha ao descriptogrfar o segredo TOTP. erro=%s", e.getMessage());
+            Log.errorf("Falha ao descriptografar. erro=%s", e.getMessage());
             throw new InfrastructureException(InfrastructureExceptionType.UNKNOWN_INFRASTRUCTURE_ERROR, Response.Status.INTERNAL_SERVER_ERROR);
         }
     }
