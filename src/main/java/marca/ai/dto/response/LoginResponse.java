@@ -7,13 +7,12 @@ public record LoginResponse(
         @JsonProperty("access_token")
         String accessToken,
 
-        @JsonProperty("token_type")
-        String tokenType,
-
         @JsonProperty("expires_in")
-        long expiresIn
-) {
-    public static LoginResponse bearer(String accessToken, long expiresIn) {
-        return new LoginResponse(accessToken, "Bearer", expiresIn);
-    }
-}
+        long expiresIn,
+
+        @JsonProperty("mfa_active")
+        boolean mfaActive,
+
+        @JsonProperty("message")
+        String message
+) {}

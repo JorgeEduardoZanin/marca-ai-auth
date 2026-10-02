@@ -10,7 +10,6 @@ import jakarta.ws.rs.Produces;
 import jakarta.ws.rs.core.MediaType;
 import jakarta.ws.rs.core.Response;
 import marca.ai.dto.request.CreateUserRequest;
-import marca.ai.dto.response.CreateUserResponse;
 import marca.ai.service.UserService;
 
 import java.util.UUID;

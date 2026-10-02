@@ -1,9 +1,7 @@
 package marca.ai.service;
 
 import io.quarkus.logging.Log;
-import io.quarkus.runtime.StartupEvent;
 import jakarta.enterprise.context.ApplicationScoped;
-import jakarta.enterprise.event.Observes;
 import jakarta.ws.rs.core.Response;
 import marca.ai.exception.InfrastructureException;
 import marca.ai.exception.type.InfrastructureExceptionType;

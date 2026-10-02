@@ -1,6 +1,5 @@
 package marca.ai.exception.type;
 
-import jakarta.ws.rs.core.Response;
 
 public enum ValidationExceptionType {
 

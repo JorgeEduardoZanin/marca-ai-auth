@@ -6,7 +6,6 @@ import jakarta.ws.rs.ext.Provider;
 import marca.ai.exception.EnterpriseException;
 import marca.ai.exception.response.ErrorsResponse;
 
-import java.util.ArrayList;
 import java.util.List;
 
 @Provider

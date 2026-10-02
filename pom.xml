@@ -106,10 +106,12 @@
             <artifactId>rest-assured</artifactId>
             <scope>test</scope>
         </dependency>
-        <!-- Scheduler (agendamento para execução de funções) -->
+        <!-- Source: https://mvnrepository.com/artifact/io.quarkus/quarkus-redis-client -->
         <dependency>
             <groupId>io.quarkus</groupId>
-            <artifactId>quarkus-scheduler</artifactId>
+            <artifactId>quarkus-redis-client</artifactId>
+            <version>3.39.5</version>
+            <scope>compile</scope>
         </dependency>
 
     </dependencies>

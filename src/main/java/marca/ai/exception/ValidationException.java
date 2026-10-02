@@ -3,7 +3,6 @@ package marca.ai.exception;
 import marca.ai.exception.type.ValidationExceptionType;
 
 import java.util.List;
-import java.util.stream.Collectors;
 
 public class ValidationException extends RuntimeException {
 

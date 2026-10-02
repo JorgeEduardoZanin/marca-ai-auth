@@ -1,14 +1,13 @@
 # marca-ai-auth
 
-Serviço de autenticação e autorização do MarcaAi. Emite e renova tokens JWT, guarda
-credenciais, controla os vínculos entre usuários e empresas e registra auditoria de
-segurança.
+Serviço de autenticação e autorização do MarcaAi. Emite tokens JWT, guarda credenciais,
+controla os vínculos entre usuários e empresas e protege o login contra força bruta,
+enumeração de contas e abuso por volume.
 
-> **Estado atual:** o schema do banco está pronto e aplicado. O código Java ainda é
-> esqueleto (`GreetingResource`, `UserController` vazio, `EnterpriseController` com um
-> `POST` que devolve `Uni.createFrom().voidItem()`). Tudo que este documento descreve
-> como fluxo ou endpoint é **desenho pretendido**, não implementação existente. As
-> seções marcadas com ✅ são o que já está de pé.
+> **Estado atual:** cadastro de usuário e login estão implementados e funcionando, com as
+> defesas descritas na §7. Refresh token, verificação de e-mail, recuperação de senha e
+> convite de funcionário ainda são **desenho pretendido** — as tabelas existem, o código
+> não. As seções marcadas com ✅ descrevem o que está de pé.
 
 ---
 
@@ -17,17 +16,16 @@ segurança.
 **Faz:**
 
 - Cadastro e autenticação de usuários (identidade única por CPF)
-- Emissão, renovação e revogação de tokens
+- Emissão de tokens JWT assinados com chave rotacionada semanalmente
 - Vínculo de usuários a empresas com papel (`DONO` / `FUNCIONARIO`)
-- Convite e ativação de funcionários
-- Recuperação de senha e verificação de e-mail
-- Rotação das chaves de assinatura dos JWT
-- Auditoria de eventos de segurança
+- Proteção do login: bloqueio progressivo por conta, rate limit por IP, detecção de
+  varredura de e-mails
+- Provisionamento de segredo TOTP no cadastro
 
 **Não faz:**
 
 - Não é dono da entidade *empresa* — ela vive no serviço `marca-ai`. Aqui só existe
-  `empresa_id` como referência solta (ver §7.2)
+  `empresa_id` como referência solta (§8.2)
 - Não decide regra de negócio de marcas, faturas ou qualquer domínio da aplicação
 - Não guarda dados de perfil além do mínimo de identificação
 
@@ -40,35 +38,18 @@ segurança.
 | Runtime | Quarkus 3.39.5, Java 25 |
 | API | `quarkus-rest` + `quarkus-rest-jackson` |
 | Banco | PostgreSQL 17 via `quarkus-reactive-pg-client` (Vert.x, sem Hibernate/JPA) |
-| Cache | Redis 8 (sessões e permissões — ver §6.3) |
-| Mensageria | Kafka (KRaft) |
+| Cache | Redis 8 — contadores de bloqueio e rate limit (§7.2) |
+| JWT | `quarkus-smallrye-jwt-build` (emissão) + `quarkus-smallrye-jwt` (verificação) |
+| Senha | `quarkus-elytron-security-common` (BCrypt) |
+| TOTP | `java-otp` + `commons-codec` (Base32) |
+| Agendamento | `quarkus-scheduler` — rotação de chaves |
 
-O acesso a dados é **reativo e por SQL explícito** (`io.vertx.mutiny.sqlclient`), não há
-ORM. Toda query é escrita à mão e retorna `Uni`/`Multi`.
+O acesso a dados é **reativo e por SQL explícito** (`io.vertx.mutiny.sqlclient`), sem ORM.
+Toda query é escrita à mão e retorna `Uni`.
 
-### Dependências ainda não adicionadas
-
-O `pom.xml` **não tem** nenhuma extensão de segurança. Para implementar o que está
-descrito aqui será preciso:
-
-```xml
-<dependency>
-    <groupId>io.quarkus</groupId>
-    <artifactId>quarkus-smallrye-jwt</artifactId>       <!-- validar JWT -->
-</dependency>
-<dependency>
-    <groupId>io.quarkus</groupId>
-    <artifactId>quarkus-smallrye-jwt-build</artifactId> <!-- emitir JWT -->
-</dependency>
-<dependency>
-    <groupId>io.quarkus</groupId>
-    <artifactId>quarkus-elytron-security-common</artifactId> <!-- BCrypt -->
-</dependency>
-<dependency>
-    <groupId>io.quarkus</groupId>
-    <artifactId>quarkus-redis-client</artifactId>
-</dependency>
-```
+> `quarkus-smallrye-jwt` e `quarkus-security` estão declarados mas ainda sem uso em
+> código — entram quando os endpoints protegidos existirem. A emissão
+> (`smallrye-jwt-build`) essa sim já é usada pelo `TokenService`.
 
 ---
 
@@ -81,8 +62,6 @@ cd docker
 docker compose up -d
 ```
 
-Sobem três serviços, todos com healthcheck e volume persistente:
-
 | Serviço | Porta | Volume |
 |---|---|---|
 | `postgres` | 5432 | `marcaai_pgdata` |
@@ -92,27 +71,21 @@ Sobem três serviços, todos com healthcheck e volume persistente:
 O compose fixa `name: marcaai`. **Não remova essa linha** — sem ela o Compose deriva o
 nome do projeto do diretório, e mover o arquivo de pasta desconecta todos os volumes.
 
-Conexão para DBeaver e afins:
-
 ```
 Host: localhost   Port: 5432   Database: db_marca_ai   User: postgres   Password: admin
+Schema: marca_ai_auth
 ```
-
-O database é `db_marca_ai`. Conectar no database padrão `postgres` mostra zero tabelas —
-ele existe e está legitimamente vazio.
 
 ### Schema e a pegadinha do initdb ✅
 
-O schema mora em `docker/initdb/` e é aplicado pelo entrypoint do Postgres:
-
 ```
-docker/initdb/01-schema.sql   tabelas, índices, constraints
-docker/initdb/02-seed.sql     um usuário de teste com papel CLIENTE
+docker/initdb/01-schema.sql   schema marca_ai_auth, tabelas, índices, constraints
+docker/initdb/02-seed.sql     usuário de teste com papel CLIENTE
 ```
 
 Esses scripts rodam **uma única vez**, quando o volume está vazio. Editar o SQL depois não
-faz efeito nenhum em um banco já inicializado — o log mostra
-`Database directory appears to contain a database; Skipping initialization`.
+faz efeito em um banco já inicializado — o log mostra `Database directory appears to
+contain a database; Skipping initialization`.
 
 Para reaplicar:
 
@@ -120,518 +93,484 @@ Para reaplicar:
 docker compose down -v && docker compose up -d   # -v apaga TODOS os volumes
 ```
 
-Isso derruba também Redis e Kafka. **Esta é a principal dívida técnica do projeto**
-(ver §9.1).
+Isso derruba também Redis e Kafka. **Principal dívida técnica do projeto** (§10.1).
 
-> ⚠️ Se um script do initdb falhar, o entrypoint aborta e o container não sobe. Um erro
-> de SQL aparece como falha de boot do Postgres, não como erro de query.
+> ⚠️ Se um script do initdb falhar, o entrypoint aborta e o container não sobe. Um erro de
+> SQL aparece como falha de boot do Postgres, não como erro de query.
 
 ---
 
-## 4. Modelo de dados ✅
+## 4. Configuração ✅
 
-Nove tabelas, todas no schema `public` do database `db_marca_ai`.
+O serviço sobe na **porta 8081** (`quarkus.http.port`) — a 8080 fica para o `marca-ai`.
 
-```
-                       ┌───────────────────┐
-                       │      usuario      │  identidade (CPF único)
-                       └─────────┬─────────┘
-          ┌──────────────┬───────┼────────┬──────────────┬──────────────┐
-          │              │       │        │              │              │
-    ┌─────┴─────┐  ┌─────┴────┐  │  ┌─────┴──────┐ ┌─────┴──────┐ ┌─────┴────────┐
-    │ credencial│  │ aceite_  │  │  │ refresh_   │ │ token_uso_ │ │  evento_     │
-    │   (1:1)   │  │  termo   │  │  │  token     │ │   unico    │ │  seguranca   │
-    └───────────┘  └──────────┘  │  └────────────┘ └────────────┘ └──────────────┘
-                    ┌────────────┴────────────┐
-              ┌─────┴───────┐        ┌────────┴────────┐
-              │papel_usuario│        │ membro_empresa  │
-              │  (global)   │        │  (por empresa)  │
-              └─────────────┘        └─────────────────┘
+### Banco
 
-    ┌──────────────────┐
-    │ chave_assinatura │  independente de usuário — chaves dos JWT
-    └──────────────────┘
+```properties
+quarkus.datasource.reactive.url=postgresql://${DB_HOST:localhost}:${DB_PORT:5432}/${DB_NAME:db_marca_ai}
+quarkus.datasource.reactive.additional-properties."search_path"=${DB_SCHEMA:marca_ai_auth}
 ```
 
-### 4.1 `usuario` — identidade
+As tabelas vivem em `marca_ai_auth`, não em `public`. O `search_path` na conexão permite
+que o SQL dos repositories não precise qualificar cada tabela.
 
-| Coluna | Tipo | Nota |
-|---|---|---|
-| `id` | `uuid` PK | **sem default** — gerado pela aplicação |
-| `nome` | `varchar(150)` | |
-| `cpf` | `char(11)` UNIQUE | só dígitos, validado na aplicação |
-| `telefone` | `varchar(16)` | |
-| `data_nascimento` | `date` | opcional |
-| `criado_em` / `atualizado_em` | `timestamptz` | |
+### Redis
 
-O CPF é a identidade natural: **um login por pessoa**, independente de quantas empresas
-ela participe.
+```properties
+quarkus.redis.hosts=redis://${REDIS_HOST:localhost}:${REDIS_PORT:6379}/1
+```
 
-### 4.2 `credencial` — como entra (1:1 com `usuario`)
+O `/1` no fim da URI seleciona o **database 1**. Sem essa propriedade o Quarkus sobe um
+Redis próprio via Dev Services (Testcontainers) e ignora o do compose.
 
-`usuario_id` é PK **e** FK, o que torna a relação 1:1 e a credencial **opcional**: um
-usuário pode existir sem credencial. Esse é exatamente o estado "convidado, ainda não
-ativou" (§6.4).
+### IP do cliente atrás de proxy
 
-| Coluna | Nota |
+```properties
+quarkus.http.proxy.proxy-address-forwarding=true
+quarkus.http.proxy.allow-x-forwarded=true
+quarkus.http.proxy.trusted-proxies=172.16.0.0/12
+```
+
+O `X-Forwarded-For` é um header que o cliente controla — aceitar sem restrição permitiria
+forjar o IP e contornar todo o rate limit da §7. O `trusted-proxies` limita de quais
+origens o header é considerado; vindo de qualquer outro lugar, o Quarkus usa o endereço
+real da conexão. **Ajuste a faixa quando houver um proxy real na frente.**
+
+### Token e chaves
+
+```properties
+auth.master-key=...              # AES-256 base64 — cifra a chave privada dos JWT
+auth.token.duration=180          # ver §9.1 — a unidade é ambígua hoje
+mp.jwt.verify.issuer=https://marca-ai.com.br/auth
+smallrye.jwt.new-token.issuer=https://marca-ai.com.br/auth
+```
+
+> A `auth.master-key` está versionada em texto claro no `application.properties`. Para
+> produção ela precisa vir de variável de ambiente ou cofre de segredos.
+
+---
+
+## 5. Modelo de dados ✅
+
+Doze tabelas no schema `marca_ai_auth` do database `db_marca_ai`.
+
+| Tabela | Papel |
 |---|---|
-| `email` | `NOT NULL`; índice único em `lower(email)` — case-insensitive |
-| `senha_hash` | `NOT NULL`; BCrypt |
-| `email_verificado_em` | nulo = não verificado |
-| `tentativas_falhas`, `bloqueado_ate` | proteção contra força bruta |
-| `senha_alterada_em` | usado para invalidar tokens emitidos antes da troca |
+| `usuario` | identidade (CPF único), sem default no `id` — gerado pela aplicação |
+| `credencial` | e-mail, hash BCrypt, verificação e bloqueio — 1:1 com `usuario` |
+| `papel_usuario` | papéis globais: `CLIENTE`, `ADMIN` |
+| `membro_empresa` | papéis por empresa: `DONO`, `FUNCIONARIO` |
+| `fator_autenticacao` | segredo TOTP cifrado, `verificado_em`, antirreplay |
+| `desafio_mfa` | desafio em curso de segundo fator |
+| `codigo_recuperacao` | códigos de recuperação de MFA (hash) |
+| `refresh_token` | sessões com rotação e detecção de reuso |
+| `token_uso_unico` | links de verificação de e-mail e recuperação de senha |
+| `aceite_termo` | LGPD — histórico por `(usuario_id, tipo, versao)` |
+| `evento_seguranca` | auditoria, `ON DELETE SET NULL` |
+| `chave_assinatura` | chaves RSA dos JWT, índice único parcial em `status='ATIVA'` |
 
-### 4.3 `papel_usuario` — papéis globais
+### `credencial` — o que sobrou
 
-```sql
-papel varchar(30) CHECK (papel IN ('CLIENTE', 'ADMIN'))
-PRIMARY KEY (usuario_id, papel)
+```
+usuario_id           uuid PK/FK
+email                varchar(254)  NOT NULL   UNIQUE btree(email) — case-sensitive (§9.5)
+senha_hash           varchar(255)  NOT NULL   BCrypt
+email_verificado_em  timestamptz              nulo = não verificado
+bloqueado_ate        timestamptz              fim do bloqueio; 9999-12-31 = permanente
+senha_alterada_em    timestamptz  NOT NULL
+criado_em            timestamptz  NOT NULL
 ```
 
-PK composta ⇒ **é N:N**: um usuário tem vários papéis, um papel pertence a vários
-usuários. Não existe tabela `papel` e isso é deliberado (§7.1).
+A coluna `tentativas_falhas` **foi removida**. O contador de falhas vive no Redis (§7.2) —
+é dado volátil, de escrita frequente, com janela de expiração: cada tentativa gerava um
+`UPDATE` e uma versão nova da tupla, no caminho mais quente da aplicação. O que fica no
+Postgres é a **decisão** de bloqueio (`bloqueado_ate`), que precisa ser durável e auditável.
 
-### 4.4 `membro_empresa` — papéis por empresa
-
-```sql
-empresa_id uuid NOT NULL                                       -- sem FK (§7.2)
-papel      varchar(30) CHECK (papel IN ('DONO', 'FUNCIONARIO'))
-PRIMARY KEY (usuario_id, empresa_id)
-```
-
-Separado de `papel_usuario` porque `DONO` não significa nada sozinho — ninguém é dono
-globalmente, é dono **de uma empresa**.
-
-A PK `(usuario_id, empresa_id)` permite **um papel por usuário por empresa**. Se um dia
-alguém puder acumular dois papéis na mesma empresa, a PK precisa virar
-`(usuario_id, empresa_id, papel)`.
-
-### 4.5 `refresh_token` — sessões com rotação
-
-| Coluna | Nota |
-|---|---|
-| `token_hash` | `char(64)` UNIQUE — SHA-256 em hex. **O token puro nunca é gravado** |
-| `familia_id` | agrupa a cadeia de rotações de uma mesma sessão |
-| `usado_em` | marca o consumo; usar duas vezes = reuso detectado |
-| `revogado_em` | revogação explícita |
-| `ip_criacao`, `user_agent` | contexto para auditoria |
-
-### 4.6 `token_uso_unico` — links de uso único
+### `chave_assinatura`
 
 ```sql
-tipo varchar(30) CHECK (tipo IN ('VERIFICAR_EMAIL', 'RECUPERAR_SENHA'))
-```
-
-Mesma estratégia de hash do refresh: guarda-se `SHA-256(token)`, nunca o token.
-
-### 4.7 `aceite_termo` — LGPD
-
-PK `(usuario_id, tipo, versao)` ⇒ histórico preservado: publicar uma versão nova dos
-termos gera uma linha nova, sem sobrescrever o aceite anterior. Guarda `ip` e `aceito_em`
-como prova.
-
-### 4.8 `evento_seguranca` — auditoria
-
-`id bigint GENERATED ALWAYS AS IDENTITY`, `detalhes jsonb`, e FK para `usuario` com
-`ON DELETE SET NULL` — o evento sobrevive à exclusão do usuário, que é o comportamento
-correto para auditoria. Índices em `(usuario_id, criado_em DESC)` e `(ip, criado_em DESC)`.
-
-### 4.9 `chave_assinatura` — chaves dos JWT
-
-```sql
-status varchar(20) CHECK (status IN ('ATIVA', 'ANTERIOR', 'REVOGADA'))
 CREATE UNIQUE INDEX uq_chave_ativa ON chave_assinatura (status) WHERE status = 'ATIVA';
 ```
 
-O índice único **parcial** garante no banco que existe no máximo uma chave `ATIVA`.
-Verificado: a segunda tentativa de inserir uma `ATIVA` é rejeitada, enquanto várias
-`ANTERIOR` convivem.
-
-A chave privada é gravada cifrada (AES-GCM, Base64); a de cifragem vem de variável de
-ambiente, **nunca do banco**.
+Índice único **parcial**: o banco garante no máximo uma chave `ATIVA`, enquanto várias
+`ANTERIOR` convivem. É dessa garantia que a rotação concorrente depende (§6.3).
 
 ---
 
-## 5. Cascatas
+## 6. O que está implementado ✅
 
-Todas as tabelas de usuário usam `ON DELETE CASCADE`, menos a auditoria:
+### 6.1 `POST /user` — cadastro
 
-| Tabela | Ao apagar o usuário |
+Tudo numa transação (`TransactionPropagation.CONTEXT`, conexão única amarrada ao contexto
+duplicado do Vert.x):
+
+1. Valida formato e conteúdo (CPF com dígito verificador, força da senha, telefone, e-mail)
+2. BCrypt da senha em worker thread (`runSubscriptionOn`) — operação bloqueante não pode
+   rodar no event loop
+3. `usuario` → `credencial` → `papel_usuario = CLIENTE` → `aceite_termo` (termos e
+   privacidade, com IP)
+4. Gera segredo TOTP de 160 bits, cifra com AES-GCM usando o `usuario_id` como AAD e grava
+   em `fator_autenticacao`
+5. Devolve o `usuario_id` e a `otpauth://` URI para o app autenticador
+
+Violações de constraint do Postgres são traduzidas por `ExceptionMapper::fromPgException`.
+
+### 6.2 `POST /login` — autenticação
+
+```
+1. valida formato do e-mail e senha não vazia
+2. IP está em blocks:ip:?                      → 401 genérico, sem tocar no banco
+3. SELECT credencial + papéis + empresas       (uma query, ARRAY/EXISTS)
+4. usuário não existe                          → conta e-mail falso para o IP, 401 genérico
+5. bloqueado_ate no futuro                     → 401 (permanente tem mensagem própria)
+6. e-mail não verificado                       → 401 específico
+7. BCrypt em worker thread
+   ├─ falhou   → incrementa falhas da conta, escala bloqueio se for marco (§7.3)
+   └─ acertou  → zera contador no Redis
+8. carrega chave ATIVA, decifra a privada, assina o JWT
+```
+
+O token leva `sub`, `upn`, `groups` (papéis globais) e as claims `owner` / `employee` com
+os UUIDs das empresas — sem consulta ao banco por requisição depois.
+
+A ordem dos passos é deliberada: o passo 2 custa um `GET` no Redis e corta o caminho caro
+(`SELECT` com quatro subqueries + BCrypt, que é lento de propósito) para quem já se
+identificou como abusivo.
+
+### 6.3 Rotação das chaves de assinatura
+
+`AuthKeyScheduler`, `@Scheduled(cron = "0 0 4 ? * MON")` — toda segunda às 4h, mais uma
+verificação no `StartupEvent`:
+
+- Gera par RSA 2048 com `SecureRandom.getInstanceStrong()`
+- `kid` no formato `2026-w40-6515` — ano e semana ISO dizem de quando a chave é, e dois
+  bytes aleatórios evitam colisão de PK em restart ou rotação manual
+- A `ATIVA` atual vira `ANTERIOR` e a nova entra como `ATIVA`, na mesma transação
+- A privada é cifrada com AES-GCM usando o `kid` como AAD
+
+Em múltiplas instâncias, a corrida é resolvida pelo banco: o índice único parcial rejeita a
+segunda `ATIVA`, e o código reconhece o `SQLSTATE` de violação única como caso normal
+("outra instância já criou a chave ativa"), não como erro.
+
+**A aplicação não sobe sem chave ativa** — o `StartupEvent` falha explicitamente.
+
+---
+
+## 7. Defesas do login ✅
+
+Três camadas independentes, cada uma ancorada numa identidade diferente.
+
+### 7.1 As camadas
+
+| Camada | Ancorada em | Limite | Onde |
+|---|---|---|---|
+| Rate limit geral | IP | 120 req/min | `IpRateLimitFilter` |
+| Varredura de e-mails | IP | 120 inexistentes / 6h | `LoginService` |
+| Força bruta de senha | conta (e-mail) | escalada progressiva | `LoginService` |
+
+Elas cobrem ataques opostos e **não se substituem**:
+
+- muitas contas a partir de um IP → só a camada de IP enxerga
+- uma conta a partir de muitos IPs → só a camada de conta enxerga
+
+As duas primeiras são contornáveis por rotação de IP, que é identidade fraca e barata de
+trocar. O contador por conta não é: ele soma as falhas daquele e-mail venha de onde vier.
+É nele que mora a proteção real contra adivinhação de senha; as camadas de IP valem pelo
+que custam — pouco esforço e muito lixo filtrado.
+
+### 7.2 Chaves no Redis (database 1)
+
+| Chave | Conteúdo | TTL | Quem escreve |
+|---|---|---|---|
+| `login:failures:<email>` | falhas de senha da conta | 7 dias | `LoginService` |
+| `login:failures:ip:<ip>` | requisições do IP (todos os endpoints) | 1 min | `IpRateLimitFilter` |
+| `login:failures:false:email:ip:<ip>` | tentativas com e-mail inexistente | 6 h | `LoginService` |
+| `blocks:ip:<ip>` | flag de IP bloqueado | 24 h | `LoginService` |
+
+Todas usam `INCR` com `EXPIRE` aplicado **só quando o retorno é 1**, ou seja, na criação da
+chave. Isso é o que impede o TTL de deslizar: a janela conta a partir da primeira
+requisição e não se renova, por mais tráfego que venha depois. Aplicar `EXPIRE`
+incondicionalmente transformaria qualquer bloqueio em permanente enquanto houvesse tráfego.
+
+Nenhuma chave precisa ser limpa — todas expiram sozinhas.
+
+### 7.3 Escalada de bloqueio por conta
+
+`CredentialUtils.calculateBlockedUntil(attempts)`:
+
+| Falhas | Bloqueio |
 |---|---|
-| `credencial`, `aceite_termo`, `papel_usuario`, `membro_empresa`, `refresh_token`, `token_uso_unico` | apagadas |
-| `evento_seguranca` | mantida, `usuario_id` vira `NULL` |
+| 5 | 1 minuto |
+| 8 | 5 minutos |
+| 11 | 15 minutos |
+| 15 | 1 hora |
+| 17 | 24 horas |
+| 20 | permanente (`9999-12-31T23:59:59Z`) |
+| outros | `null` — não é marco, só "e-mail ou senha incorretos" |
+
+São **marcos exatos**, não faixas, e isso é intencional: entre um marco e o outro a pessoa
+erra e recebe apenas a mensagem genérica. Faixas (`>= 5`) rebloqueariam a cada erro e
+destruiriam a progressão.
+
+O `null` do `default` significa "não é marco de bloqueio" e **precisa** ser tratado pelo
+chamador — é o `if (blockedUntil != null)` no `LoginService`. Sem esse guard, o `null`
+chega ao `String.format` da mensagem e vira `"bloqueado até null/null/null"`, e pior,
+grava `NULL` em `bloqueado_ate`, deixando a conta sem bloqueio nenhum.
+
+O contador do Redis é apagado (`clearFaults`) no login bem-sucedido. É isso que torna a
+janela de 7 dias segura: ela só acumula para quem **nunca** acerta. Uma janela curta seria
+pior — bastaria espaçar as tentativas para o contador zerar sozinho e nunca escalar.
+
+### 7.4 Bloqueio de IP por varredura
+
+Tentativa de login com e-mail que não existe é sinal quase puro: uso legítimo é
+praticamente zero. Passando de 120 em 6 horas, o IP vai para `blocks:ip:` por 24 horas.
+
+O log do bloqueio sai **uma única vez**, e isso depende da atomicidade do `INCR`:
+
+```java
+.invoke(blocks -> { if (blocks == 1) Log.warnf(...); })
+```
+
+Só uma requisição no mundo recebe `1` como retorno, então não há corrida nem necessidade
+de ler antes de escrever. Logar a cada requisição de IP já bloqueado seria um vetor de
+abuso — a frequência estaria nas mãos do atacante.
+
+Um IP bloqueado recebe a mesma mensagem genérica de credencial inválida. Não há como
+descobrir que foi detectado.
+
+### 7.5 Rate limit geral — `IpRateLimitFilter`
+
+`@ServerRequestFilter` global, descoberto por CDI, sem registro em nenhum controller.
+Isento: `/q/health`, `/q/metrics`, `/q/openapi` — se as probes entrassem na contagem, o
+orquestrador receberia 429 e reiniciaria o pod.
+
+Um único `INCR` por requisição decide tudo (o retorno já é o total, dispensando um `GET`
+antes), e a recuperação fica **colada** na chamada ao Redis:
+
+```java
+return failedAttemptsRepository.insertFailedAttemptsIP(ip)
+        .onFailure().recoverWithItem(this::rateLimitUnavailable)   // Redis fora → 0L → passa
+        .chain(attempts -> attempts > MAX_REQUESTS_PER_MINUTE ? ... : ...);
+```
+
+Nesse ponto da cadeia a única falha possível é técnica — a exceção de negócio só nasce no
+`chain` seguinte. Por isso não é preciso filtrar por tipo. O comportamento é **fail open**:
+Redis indisponível libera a requisição, porque derrubar a API inteira é pior do que ficar
+um minuto sem rate limit.
+
+> Rate limit na aplicação é uma primeira linha. Para esgotamento por volume, a defesa
+> estruturalmente certa é a borda (nginx, gateway, CDN): quando a requisição chega aqui, o
+> TCP já foi aceito e o TLS já foi negociado — e o handshake custa mais que verificar um
+> JWT.
+
+### 7.6 Enumeração de contas
+
+O login responde `INCORRECT_EMAIL_OR_PASSWORD` tanto para e-mail inexistente quanto para
+senha errada. Duas exceções conhecidas e aceitas:
+
+- `EMAIL_HAS_NOT_BEEN_VERIFIED` só aparece para conta existente — **decisão de produto**:
+  avisar quem esqueceu de verificar vale mais que o sigilo sobre o cadastro existir
+- O BCrypt só roda no ramo em que o usuário existe, então a latência difere (§9.3)
 
 ---
 
-## 6. Como deve funcionar
+## 8. Decisões de modelagem
 
-### 6.1 Cadastro de cliente
-
-1. `POST /auth/registro` com nome, CPF, telefone, e-mail, senha e aceite dos termos
-2. Valida CPF (dígito verificador) e força da senha
-3. Numa transação: cria `usuario`, `credencial` (BCrypt), `papel_usuario = CLIENTE` e as
-   linhas de `aceite_termo`
-4. Gera `token_uso_unico` tipo `VERIFICAR_EMAIL` e dispara o e-mail
-5. Registra `evento_seguranca`
-
-Colisão de CPF ou e-mail deve responder a mesma mensagem genérica — não confirmar a
-existência de cadastro para quem não está autenticado.
-
-### 6.2 Login
-
-1. `POST /auth/login` com e-mail e senha
-2. Busca por `lower(email)`; verifica `bloqueado_ate`
-3. Confere BCrypt. Falhou: incrementa `tentativas_falhas`, e ao passar do limite preenche
-   `bloqueado_ate` (backoff exponencial). Acertou: zera o contador
-4. Carrega os papéis dos dois escopos em **uma** query — `UNION ALL`, não join, porque as
-   tabelas são conjuntos disjuntos:
-
-```sql
-SELECT 'GLOBAL' AS escopo, NULL::uuid AS empresa_id, papel
-  FROM papel_usuario  WHERE usuario_id = $1
-UNION ALL
-SELECT 'EMPRESA',          empresa_id,               papel
-  FROM membro_empresa WHERE usuario_id = $1;
-```
-
-O plano usa as PKs compostas (`usuario_id` é a coluna líder das duas), resultando em dois
-index scans e um `Append` — sem índice adicional e sem sort.
-
-5. Emite access token e refresh token, gravando `SHA-256(refresh)` com `familia_id` novo
-
-### 6.3 Autorização por requisição
-
-**Papéis globais** vão na claim `groups`, que o SmallRye JWT mapeia direto:
-
-```java
-@RolesAllowed("ADMIN")
-```
-
-**Papéis de empresa não cabem em `@RolesAllowed`** — e isso não é limitação da
-ferramenta. `ADMIN` é estático; "é DONO desta empresa" depende de qual empresa a
-requisição está tocando, coisa que só se sabe em runtime:
-
-```java
-@GET @Path("/empresas/{empresaId}/faturas")
-public Uni<List<Fatura>> listar(@PathParam("empresaId") UUID empresaId) {
-    if (!contexto.temPapel(empresaId, "DONO")) throw new ForbiddenException();
-    ...
-}
-```
-
-Vale encapsular num interceptor com anotação própria (`@PapelEmpresa("DONO")`) em vez de
-repetir o `if`.
-
-Formato do token:
-
-```json
-{
-  "sub": "8b77990b-6857-4183-9df5-c244fb2afef0",
-  "groups": ["CLIENTE"],
-  "empresas": { "c8366e20-...": "DONO", "6c39c582-...": "FUNCIONARIO" },
-  "exp": 1758800000,
-  "kid": "2026-01-a"
-}
-```
-
-**Nenhuma consulta ao banco por requisição.** Os papéis são resolvidos uma vez no login e
-viajam assinados. O custo é a **defasagem**: remover alguém de uma empresa não invalida o
-token dele até expirar. Por isso o access token é curto — 15 minutos — e a revogação real
-acontece no refresh.
-
-Quando as permissões granulares entrarem (§9.2), elas **não** vão no token: mudança de
-permissão feita pelo DONO precisa valer na hora, então serão lidas do Redis com
-invalidação na escrita, e o Postgres só como fallback.
-
-### 6.4 Convite de funcionário
-
-Só um usuário autenticado e `DONO` da empresa cria funcionário — não existe cadastro
-público de funcionário, porque a operação acontece dentro do contexto de uma empresa, e
-esse contexto vem do token.
-
-```
-DONO autenticado
-  └─ POST /empresas/{id}/funcionarios  { nome, cpf, email }
-       ├─ cria `usuario`  (SEM credencial — ainda não tem senha)
-       ├─ cria `membro_empresa` com papel FUNCIONARIO
-       ├─ gera `token_uso_unico` de convite
-       └─ envia e-mail com o link
-
-FUNCIONARIO abre o link
-  └─ POST /auth/convite/aceitar  { token, senha }
-       ├─ valida o token (hash, expiração, não usado)
-       ├─ cria `credencial` com a senha escolhida
-       ├─ marca `usado_em` e `email_verificado_em`
-       └─ registra evento
-```
-
-Se o CPF já existir, **não** cria usuário novo: apenas adiciona `membro_empresa`. É o caso
-de alguém que já é cliente e passa a ser funcionário de uma empresa, ou que trabalha em
-duas empresas. Um login, vários vínculos.
-
-> ⚠️ Este fluxo **não funciona com o schema atual**. Ver §8.1 e §8.2.
-
-### 6.5 Renovação com detecção de reuso
-
-```
-POST /auth/refresh  { refresh_token }
-  ├─ localiza por SHA-256(token)
-  ├─ não existe            → 401
-  ├─ revogado ou expirado  → 401
-  ├─ JÁ TEM `usado_em`     → REUSO: revoga a família inteira, registra evento, 401
-  └─ válido                → marca `usado_em`, emite par novo com o MESMO `familia_id`
-```
-
-A detecção de reuso é o que torna o refresh seguro: se um token vazou e o atacante o usa,
-o usuário legítimo tentará usar o mesmo token depois e a família inteira cai — derrubando
-os dois. Melhor uma sessão perdida do que um invasor persistente.
-
-Logout revoga a família corrente. "Sair de todos os dispositivos" revoga todas as famílias
-do usuário.
-
-### 6.6 Recuperação de senha
-
-1. `POST /auth/senha/recuperar` com o e-mail
-2. **Sempre** responde `202 Accepted`, exista o e-mail ou não — caso contrário o endpoint
-   vira um oráculo de cadastro
-3. Se existir, gera `token_uso_unico` tipo `RECUPERAR_SENHA` com validade curta
-4. `POST /auth/senha/redefinir` valida, troca o hash, atualiza `senha_alterada_em`,
-   **revoga todos os refresh tokens** e marca o token como usado
-
-### 6.7 Rotação das chaves
-
-- Chave `ATIVA` assina os tokens novos
-- Ao rotacionar: a `ATIVA` vira `ANTERIOR` e entra uma `ATIVA` nova
-- `ANTERIOR` continua **validando** tokens em circulação até que todos expirem
-- `GET /.well-known/jwks.json` publica as públicas `ATIVA` + `ANTERIOR`
-- `REVOGADA` sai do JWKS imediatamente (usar só em incidente — derruba todos os tokens)
-
----
-
-## 7. Decisões de modelagem e o porquê
-
-### 7.1 Papel como `CHECK`, não como tabela
+### 8.1 Papel como `CHECK`, não como tabela
 
 `papel_usuario.papel` é validado por `CHECK (papel IN ('CLIENTE','ADMIN'))`, sem tabela
-`papel`. Isso foi questionado e testado no banco:
+`papel`. O `CHECK` dá a mesma proteção que uma FK com `ON DELETE RESTRICT` nos dois
+sentidos: valor inválido é rejeitado, e remover da lista um papel em uso falha.
 
-```
-INSERT 'GERENTE' → ERROR: violates check constraint
-INSERT 'admin'   → ERROR: violates check constraint   (case-sensitive)
-INSERT 'ADMIN'   → INSERT 0 1
-```
+A desvantagem é a descoberta: listar os papéis válidos exigiria regex em
+`pg_get_constraintdef()`. Na prática se escreve um `enum` em Java e a lista passa a existir
+em dois lugares. Com dois papéis fixos, aceitamos o custo.
 
-E ao tentar remover da lista um papel em uso:
+### 8.2 `empresa_id` sem FK
 
-```
-ALTER ... CHECK (papel IN ('ADMIN'))   -- tirando CLIENTE
-→ ERROR: check constraint is violated by some row
-```
+`membro_empresa` tem FK para `usuario`, mas nenhuma para `empresa_id` — a empresa vive no
+serviço `marca-ai`. Qualquer UUID é aceito, e empresa excluída do outro lado deixa linhas
+órfãs. **A consistência de `empresa_id` é responsabilidade da aplicação, não do banco.**
 
-O `CHECK` dá a **mesma** proteção que uma FK com `ON DELETE RESTRICT`, nos dois sentidos.
-O papel não fica "solto".
-
-A desvantagem real é outra: para listar os papéis válidos, a aplicação teria que fazer
-regex em `pg_get_constraintdef()`. Na prática se escreve um `enum` em Java, e a lista
-passa a existir em dois lugares sem nada garantindo que concordem. Como são dois papéis
-fixos verificados por anotação, aceitamos esse custo. Uma tabela `papel` sozinha
-resolveria a descoberta, mas não a duplicação — o código continuaria com
-`@RolesAllowed("ADMIN")` hardcoded.
-
-### 7.2 `empresa_id` sem FK — e o que isso custa
-
-`membro_empresa` tem FK para `usuario`, mas **nenhuma** para `empresa_id`:
-
-```
-p: PRIMARY KEY (usuario_id, empresa_id)
-f: FOREIGN KEY (usuario_id) REFERENCES usuario(id) ON DELETE CASCADE
-c: CHECK (papel IN ('DONO','FUNCIONARIO'))
-```
-
-É consequência de a empresa viver no serviço `marca-ai`. Qualquer UUID é aceito ali, e se
-a empresa for excluída do outro lado ficam linhas órfãs sem ninguém avisar. **A
-consistência de `empresa_id` é responsabilidade da aplicação, não do banco.**
-
-Duas saídas, ambas em aberto (§8.3):
-
-1. **Banco compartilhado** — hoje os dois módulos apontam para `db_marca_ai`, então criar
-   a FK de verdade está ao alcance
-2. **Bancos separados** — mantém o UUID solto e exige reconciliação, via evento Kafka de
-   empresa excluída ou job de limpeza
-
-### 7.3 Segredos nunca em texto claro
+### 8.3 Segredos nunca em texto claro
 
 | Dado | Armazenamento |
 |---|---|
 | Senha | BCrypt |
-| Refresh token | SHA-256 hex (`char(64)`) |
-| Token de uso único | SHA-256 hex |
-| Chave privada JWT | AES-GCM, chave via ambiente |
+| Refresh token / token de uso único | SHA-256 hex |
+| Chave privada JWT | AES-GCM, AAD = `kid` |
+| Segredo TOTP | AES-GCM, AAD = `usuario_id` |
 
-Vazamento do dump do banco não entrega sessão nem senha de ninguém.
-
----
-
-## 8. Pendências que bloqueiam o fluxo de convite
-
-### 8.1 O e-mail está na tabela errada
-
-```
-credencial | email      | NOT NULL
-credencial | senha_hash | NOT NULL
-usuario    | (não tem coluna de email)
-```
-
-Para **enviar** o convite é preciso do e-mail, mas ele só existe em `credencial`, que
-exige `senha_hash NOT NULL` — justamente o que o convidado ainda não definiu. Impasse.
-
-**Correção:** mover `email` (e o índice único em `lower(email)`) para `usuario`.
-Conceitualmente é onde ele deveria estar: e-mail é identidade, não credencial.
-`credencial` fica com a senha e os campos de bloqueio.
-
-### 8.2 Falta o tipo de token de convite
-
-```sql
-tipo varchar(30) CHECK (tipo IN ('VERIFICAR_EMAIL', 'RECUPERAR_SENHA'))
-```
-
-O convite é um terceiro caso. Dá para reaproveitar `RECUPERAR_SENHA`, mas a expiração é
-bem diferente — convite dura dias, recuperação dura minutos — então vale um
-`DEFINIR_SENHA` próprio.
-
-### 8.3 De quem é a entidade *empresa*?
-
-Existe um `EnterpriseController` nos **dois** módulos, e o do `marca-ai-auth` já tem um
-`POST /enterprise`. Isso contradiz o comentário do schema ("a empresa mora na API") e
-precisa ser decidido antes de avançar: ou a empresa é criada aqui e o `marca-ai` consome,
-ou o contrário. Hoje está nos dois lugares pela metade.
-
-Vale decidir junto a nomenclatura: o schema é em português (`empresa`, `usuario`,
-`papel`) e os controllers em inglês (`EnterpriseController`, `UserController`).
-
-### 8.4 Sem dependência de segurança no `pom.xml`
-
-Nada de JWT, BCrypt ou Redis foi adicionado ainda (§2).
-
-As pendências 8.1 e 8.2 alteram tabelas existentes — com o `initdb` isso exige
-`down -v`, derrubando Redis e Kafka junto. As permissões de §9.2, por serem aditivas, não
-têm esse problema.
+O AAD amarra cada texto cifrado ao seu dono: um segredo TOTP copiado para outra linha não
+decifra, porque o `usuario_id` não bate.
 
 ---
 
-## 9. Roadmap
+## 9. Pendências conhecidas
 
-### 9.1 Trocar `initdb` por Flyway — prioridade
+### 9.1 A unidade de `auth.token.duration` é ambígua
 
-Hoje qualquer alteração de schema exige destruir o banco. Para um serviço de autenticação
-que vai evoluir, isso não se sustenta.
+```properties
+auth.token.duration=180
+```
+```java
+.expiresIn(Duration.ofMinutes(duration))      // 180 minutos = 3 horas
+return new TokenResponse(token, duration);    // devolve 180 cru ao cliente
+```
 
-Como o projeto usa o cliente **reativo**, o Flyway precisa de um datasource JDBC ao lado
-só para migrar no boot:
+O JWT vale 3 horas, mas o cliente recebe `180` sem unidade e, pela convenção de
+`expires_in`, vai ler como 180 **segundos**. Resolver nomeando a unidade
+(`auth.token-duration-minutes`) ou guardando em segundos com `Duration.ofSeconds`.
+
+TTL curto é a defesa mais barata contra token vazado — e a única que funciona antes de
+existir revogação.
+
+### 9.2 MFA provisionado mas não exigido
+
+O cadastro gera e cifra o segredo TOTP, o login calcula `mfa_ativo` e carrega no
+`LoginModel`... e **nada consulta esse campo**. Conta com segundo fator configurado e
+verificado entra só com a senha. As tabelas `desafio_mfa` e `codigo_recuperacao` existem e
+estão vazias de uso.
+
+É a defesa que falta contra credential stuffing — senha vazada de outro serviço, testada
+uma vez por conta, de muitos IPs. Nenhuma das três camadas da §7 acende nesse ataque, e
+nenhum contador acenderia: cada tentativa isolada é indistinguível de um login legítimo.
+
+### 9.3 Tempo de resposta denuncia conta existente
+
+`BcryptUtil.matches` só é chamado quando o usuário existe. Mesmo com mensagens idênticas, a
+diferença de latência separa os dois casos. A correção é comparar contra um hash dummy no
+ramo `model == null`.
+
+### 9.4 `clearBlocksUser` sem chamador
+
+O SQL está correto, mas nada chama. O uso previsto é desbloqueio administrativo de quem
+levou `PERMANENT_BLOCK` — e esse endpoint precisa limpar **os dois lados**:
+
+```java
+credentialRepository.clearBlocksUser(ID)
+        .chain(() -> failedAttemptsRepository.clearFaults(email));
+```
+
+Sem o segundo passo, o contador continua em 20 com TTL de 7 dias. A próxima falha leva a
+21, que cai no `default -> null` da escalada, e a conta fica **sem bloqueio nenhum** até o
+contador expirar.
+
+### 9.5 E-mail é case-sensitive
+
+O índice é `UNIQUE btree(email)`, sem `lower()`, e o login busca com `WHERE c.email = $1`.
+Consequência: `Joao@teste.com` e `joao@teste.com` são contas **diferentes** — ambas podem
+ser cadastradas, e quem digitar o e-mail com a capitalização errada no login recebe
+"e-mail ou senha incorretos" sem entender por quê. Verificado no banco: a busca pelo mesmo
+endereço em maiúsculas devolve zero linhas.
+
+A correção é normalizar na entrada (`email.toLowerCase()` no cadastro e no login) e trocar
+o índice por `UNIQUE (lower(email))`, que impede o cadastro duplicado no banco.
+
+### 9.6 Menores
+
+- `Retry-After` ausente na resposta 429 do `MiddlewareExceptionHandler`
+- A chave `login:failures:ip:` guarda a contagem de todas as requisições de todos os
+  endpoints — não são falhas, nem são de login
+- `CredentialUtils`: construtor `public` em classe utilitária; constante `fourteen` vale 15
+- Imports não usados: `LocalDateTime` em `LoginService`, `org.jose4j.http.Response` em
+  `IpRateLimitFilter`
+
+---
+
+## 10. Roadmap
+
+### 10.1 Trocar `initdb` por Flyway — prioridade
+
+Hoje qualquer alteração de schema exige destruir o banco. Como o projeto usa o cliente
+reativo, o Flyway precisa de um datasource JDBC ao lado só para migrar no boot:
 
 ```xml
 <dependency><groupId>io.quarkus</groupId><artifactId>quarkus-flyway</artifactId></dependency>
 <dependency><groupId>io.quarkus</groupId><artifactId>quarkus-jdbc-postgresql</artifactId></dependency>
 ```
 
-```properties
-quarkus.datasource.jdbc.url=jdbc:postgresql://localhost:5432/db_marca_ai
-quarkus.datasource.reactive.url=postgresql://localhost:5432/db_marca_ai
-quarkus.flyway.migrate-at-start=true
+O `01-schema.sql` vira `src/main/resources/db/migration/V1__init.sql`.
+
+### 10.2 Fluxos que faltam
+
+- Verificação de e-mail e recuperação de senha (`token_uso_unico` já existe)
+- Refresh token com rotação e detecção de reuso (`refresh_token` já existe)
+- Convite e ativação de funcionário
+- `GET /.well-known/jwks.json` publicando as públicas `ATIVA` + `ANTERIOR`
+- Endpoints protegidos com `@RolesAllowed` — aí `quarkus-smallrye-jwt` e
+  `quarkus-security` saem do papel
+
+### 10.3 Revogação de token
+
+JWT é auto-contido e não dá para invalidar antes de expirar — trocar a senha ou sair de
+todos os dispositivos não derruba o que já foi emitido. A saída é uma denylist de `jti` no
+Redis com TTL igual ao tempo restante do token:
+
+```
+SET revoked:<jti> 1 EX <segundos_restantes>
 ```
 
-O `01-schema.sql` vira `src/main/resources/db/migration/V1__init.sql`, e as pendências da
-§8 viram `V2__`, `V3__`.
+A chave some sozinha quando o token expiraria de qualquer jeito. Custa uma consulta por
+requisição — o preço da revogação, que o TTL curto mantém baixo.
 
-### 9.2 Permissões granulares — depois
+### 10.4 Rate limit por usuário
 
-O DONO tem acesso a tudo da empresa; o FUNCIONARIO tem acesso limitado, definido pelo
-DONO. O modelo é **aditivo**, não exige `ALTER` em nada:
+Em endpoint protegido existe identidade forte: o `sub` do token. Rate limit ancorado nele é
+imune a rotação de IP. O filtro precisa rodar **depois** da autenticação, enquanto o de IP
+(§7.5) roda antes — a camada de IP cobre quem ainda não tem identidade, a de usuário cobre
+quem já tem.
 
-```sql
-CREATE TABLE permissao (
-    codigo    varchar(60) PRIMARY KEY,   -- 'MARCA_CRIAR', 'FATURA_LER'
-    descricao varchar(160) NOT NULL
-);
+### 10.5 Outros
 
-CREATE TABLE membro_permissao (
-    usuario_id uuid        NOT NULL,
-    empresa_id uuid        NOT NULL,
-    permissao  varchar(60) NOT NULL REFERENCES permissao(codigo),
-    PRIMARY KEY (usuario_id, empresa_id, permissao),
-    FOREIGN KEY (usuario_id, empresa_id)
-        REFERENCES membro_empresa(usuario_id, empresa_id) ON DELETE CASCADE
-);
-```
-
-`permissao` é catálogo populado por migration — cada código corresponde a uma verificação
-no código, então permissão nova significa deploy. O DONO só marca quais valem para cada
-funcionário. Os defaults viram um `INSERT ... SELECT` na criação do funcionário.
-
-> **Regra:** o DONO **não** recebe linhas em `membro_permissao`. Trate como implícito
-> (`if (papel == DONO) permitir`). Materializar obrigaria a fazer backfill em todos os
-> donos de todas as empresas a cada permissão nova.
-
-### 9.3 Superfície de API pretendida
-
-**Público**
-
-| Método | Rota |
-|---|---|
-| `POST` | `/auth/registro` |
-| `POST` | `/auth/login` |
-| `POST` | `/auth/refresh` |
-| `POST` | `/auth/senha/recuperar` |
-| `POST` | `/auth/senha/redefinir` |
-| `POST` | `/auth/convite/aceitar` |
-| `GET` | `/auth/email/verificar` |
-| `GET` | `/.well-known/jwks.json` |
-
-**Autenticado**
-
-| Método | Rota | Exige |
-|---|---|---|
-| `GET` | `/me` | qualquer |
-| `POST` | `/auth/logout` | qualquer |
-| `POST` | `/empresas` | qualquer (vira `DONO`) |
-| `POST` | `/empresas/{id}/funcionarios` | `DONO` |
-| `GET` | `/empresas/{id}/funcionarios` | `DONO` |
-| `DELETE` | `/empresas/{id}/funcionarios/{usuarioId}` | `DONO` |
-
-### 9.4 Outros
-
-- Rate limit por IP e por e-mail no login e na recuperação
-- Publicar eventos de segurança no Kafka para consumo externo
+- Publicar `evento_seguranca` no Kafka
 - Job de expurgo de `refresh_token` e `token_uso_unico` expirados
 - Testes de integração com `@QuarkusTest` + Testcontainers
+- Decidir de quem é a entidade *empresa* (§8.2) e unificar a nomenclatura — schema em
+  português, controllers em inglês
 
 ---
 
-## 10. Desenvolvimento
+## 11. Desenvolvimento
 
 ```bash
-./mvnw quarkus:dev          # modo dev com live reload
-./mvnw test                 # testes
-./mvnw package              # JAR
-./mvnw package -Dnative     # binário nativo
+./mvnw quarkus:dev          # modo dev com live reload (porta 8081)
+./mvnw test
+./mvnw package
+./mvnw package -Dnative
 ```
 
-Dev UI em <http://localhost:8080/q/dev/> (só em modo dev).
+Dev UI em <http://localhost:8081/q/dev/> (só em modo dev).
 
-> O `application.properties` deste módulo está **vazio**. Sem `quarkus.datasource.*`
-> explícito, o Dev Services sobe um Postgres descartável em porta aleatória e o serviço
-> não enxerga o banco do compose. O módulo `marca-ai` já tem essa configuração; replique-a
-> aqui ao começar a implementar.
+### Rodando pelo terminal
 
----
+O projeto compila com `maven.compiler.release=25`. Se o `java` padrão do shell for mais
+antigo, o dev mode falha com `UnsupportedClassVersionError` (class file 69). Aponte o
+`JAVA_HOME` antes:
 
-## 11. Estado do código
+```bash
+export JAVA_HOME=~/.sdkman/candidates/java/25-open
+```
 
-| Arquivo | Situação |
-|---|---|
-| `GreetingResource.java` | scaffold do Quarkus, `GET /hello` |
-| `UserController.java` | classe vazia |
-| `EnterpriseController.java` | `POST /enterprise` devolvendo `Uni.createFrom().voidItem()` |
-| `service/EnterpriseService.java` | classe vazia |
+### Inspecionando o estado das defesas
 
-Nada de autenticação está implementado. O schema é a única parte pronta.
+```bash
+# contadores e bloqueios
+docker exec redis redis-cli -n 1 --scan --pattern 'login:*'
+docker exec redis redis-cli -n 1 --scan --pattern 'blocks:*'
+docker exec redis redis-cli -n 1 ttl blocks:ip:<ip>
+
+# destravar uma conta em teste
+docker exec redis redis-cli -n 1 del login:failures:<email>
+docker exec -e PGPASSWORD=admin postgresql psql -U postgres -d db_marca_ai \
+  -c "UPDATE marca_ai_auth.credencial SET bloqueado_ate = NULL WHERE email='<email>';"
+
+# verificar um e-mail sem o fluxo de verificação
+docker exec -e PGPASSWORD=admin postgresql psql -U postgres -d db_marca_ai \
+  -c "UPDATE marca_ai_auth.credencial SET email_verificado_em = now() WHERE email='<email>';"
+```
+
+> Quando uma query falhar, o Postgres registra a instrução inteira no log do container —
+> é o caminho mais rápido para achar SQL malformado:
+> `docker logs postgresql 2>&1 | grep -A20 "ERROR:"`

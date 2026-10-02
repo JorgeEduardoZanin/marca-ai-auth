@@ -3,7 +3,6 @@ package marca.ai.dto.request;
 import com.fasterxml.jackson.annotation.JsonProperty;
 import marca.ai.exception.LoginException;
 import marca.ai.exception.type.LoginExceptionType;
-import marca.ai.exception.type.ValidationExceptionType;
 import marca.ai.utils.PatternValidation;
 
 public record LoginRequest (

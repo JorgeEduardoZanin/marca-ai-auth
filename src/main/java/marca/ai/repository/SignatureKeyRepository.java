@@ -2,10 +2,12 @@ package marca.ai.repository;
 
 import io.smallrye.mutiny.Uni;
 import io.vertx.mutiny.sqlclient.Pool;
+import io.vertx.mutiny.sqlclient.Row;
 import io.vertx.mutiny.sqlclient.SqlConnection;
 import io.vertx.mutiny.sqlclient.Tuple;
 import io.vertx.sqlclient.TransactionPropagation;
 import jakarta.enterprise.context.ApplicationScoped;
+import marca.ai.model.SignatureKeyModel;
 
 @ApplicationScoped
 public class SignatureKeyRepository {
@@ -60,7 +62,7 @@ public class SignatureKeyRepository {
     public Uni<Boolean> existsActiveSignatureKey () {
 
          final String EXISTS_ACTIVE_KEY = """
-            SELECT EXISTS (
+            SELECT EXISTS(
                 SELECT 1 FROM marca_ai_auth.chave_assinatura
                  WHERE status = 'ATIVA'
             ) AS existe
@@ -69,5 +71,29 @@ public class SignatureKeyRepository {
         return pool.preparedQuery(EXISTS_ACTIVE_KEY)
                 .execute()
                 .map(rowSet -> rowSet.iterator().next().getBoolean("existe"));
+    }
+
+    public Uni<SignatureKeyModel> findSignatureKey () {
+
+        String sql = """
+                SELECT 
+                    ca.kid, 
+                    ca.chave_privada_cifrada
+                FROM marca_ai_auth.chave_assinatura ca
+                WHERE ca.status = 'ATIVA'
+                """;
+
+        return pool.preparedQuery(sql)
+                .execute()
+                .map(rowSet -> {
+                    if (rowSet.size() == 0) return null;
+
+                    Row row = rowSet.iterator().next();
+
+                    return new SignatureKeyModel(
+                            row.getString("kid"),
+                            row.getString("chave_privada_cifrada")
+                    );
+                });
     }
 }
