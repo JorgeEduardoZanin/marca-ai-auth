@@ -56,7 +56,7 @@ public class TokenService {
                             .claim("owner", loginModel.owner())
                             .claim("employee", loginModel.employee())
                             .expiresIn(Duration.ofMinutes(duration))
-                            .sign(privateKey), duration, loginModel.mfaActive());
+                            .sign(privateKey), duration);
                 });
 
 

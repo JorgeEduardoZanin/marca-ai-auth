@@ -1,13 +1,11 @@
 package marca.ai.dto.response;
 
+import com.fasterxml.jackson.annotation.JsonIgnore;
+import com.fasterxml.jackson.annotation.JsonInclude;
 import com.fasterxml.jackson.annotation.JsonProperty;
-import jakarta.json.Json;
 
-import java.util.UUID;
-
-public record LoginResponse(
-
-        UUID id,
+@JsonInclude(JsonInclude.Include.NON_NULL)
+public record MFAResponse(
 
         @JsonProperty("uri")
         String uri,
@@ -16,5 +14,5 @@ public record LoginResponse(
         boolean mfaActive,
 
         @JsonProperty("expires_in")
-        int expiresIn
-) {}
+        long expiresIn)
+{}

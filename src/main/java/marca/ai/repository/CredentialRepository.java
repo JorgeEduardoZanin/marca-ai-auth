@@ -8,6 +8,7 @@ import io.vertx.sqlclient.TransactionPropagation;
 import jakarta.enterprise.context.ApplicationScoped;
 import marca.ai.dto.request.CreateUserRequest;
 import marca.ai.model.LoginModel;
+import marca.ai.model.MFAModel;
 
 import java.time.OffsetDateTime;
 import java.util.Set;
@@ -44,17 +45,18 @@ public class CredentialRepository {
 
     }
 
-    public Uni<LoginModel> login (String email) {
+    public Uni<LoginModel> login (UUID ID) {
 
         String sql = """
                 SELECT 
                     c.usuario_id,
+                    c.email,
                     c.senha_hash,
                     c.email_verificado_em,
                     c.bloqueado_ate,
                     c.senha_alterada_em,
-                    EXISTS(SELECT 1 FROM marca_ai_auth.fator_autenticacao f 
-                        WHERE f.usuario_id = c.usuario_id AND f.verificado_em IS NOT NULL) AS mfa_ativo,
+                    fa.segredo_cifrado, 
+                    fa.verificado_em,
                     ARRAY(SELECT p.papel
                         FROM marca_ai_auth.papel_usuario p
                         WHERE p.usuario_id = c.usuario_id) AS papeis,
@@ -63,6 +65,55 @@ public class CredentialRepository {
                     ARRAY(SELECT me.empresa_id FROM marca_ai_auth.membro_empresa me                  
                         WHERE me.usuario_id = c.usuario_id AND me.papel = 'FUNCIONARIO') AS funcionario
                 FROM marca_ai_auth.credencial c
+                INNER JOIN marca_ai_auth.fator_autenticacao fa ON fa.usuario_id = c.usuario_id
+                WHERE c.usuario_id = $1
+                """;
+
+        return pool.preparedQuery(sql)
+                .execute(Tuple.of(ID))
+                .map(rowSet -> {
+                    if (rowSet.size() == 0) return null;
+
+                    Row row = rowSet.iterator().next();
+
+                    return new LoginModel(
+                            row.getUUID("usuario_id"),
+                            row.getString("email"),
+                            row.getString("senha_hash"),
+                            row.getOffsetDateTime("email_verificado_em"),
+                            row.getOffsetDateTime("bloqueado_ate"),
+                            row.getOffsetDateTime("senha_alterada_em"),
+                            row.getString("segredo_cifrado"),
+                            row.getOffsetDateTime("verificado_em") != null,
+                            Set.of(row.getArrayOfStrings("papeis")),
+                            Set.of(row.getArrayOfUUIDs("dono")),
+                            Set.of(row.getArrayOfUUIDs("funcionario"))
+                    );
+
+                });
+    }
+
+    public Uni<LoginModel> login (String email) {
+
+        String sql = """
+                SELECT 
+                    c.usuario_id,
+                    c.email,
+                    c.senha_hash,
+                    c.email_verificado_em,
+                    c.bloqueado_ate,
+                    c.senha_alterada_em,
+                    fa.segredo_cifrado, 
+                    fa.verificado_em,
+                    ARRAY(SELECT p.papel
+                        FROM marca_ai_auth.papel_usuario p
+                        WHERE p.usuario_id = c.usuario_id) AS papeis,
+                    ARRAY(SELECT me.empresa_id FROM marca_ai_auth.membro_empresa me                 
+                        WHERE usuario_id = c.usuario_id AND me.papel = 'DONO') AS dono,           
+                    ARRAY(SELECT me.empresa_id FROM marca_ai_auth.membro_empresa me                  
+                        WHERE me.usuario_id = c.usuario_id AND me.papel = 'FUNCIONARIO') AS funcionario
+                FROM marca_ai_auth.credencial c
+                INNER JOIN marca_ai_auth.fator_autenticacao fa ON fa.usuario_id = c.usuario_id
                 WHERE c.email = $1
                 """;
 
@@ -75,11 +126,13 @@ public class CredentialRepository {
 
                     return new LoginModel(
                             row.getUUID("usuario_id"),
+                            row.getString("email"),
                             row.getString("senha_hash"),
                             row.getOffsetDateTime("email_verificado_em"),
                             row.getOffsetDateTime("bloqueado_ate"),
                             row.getOffsetDateTime("senha_alterada_em"),
-                            row.getBoolean("mfa_ativo"),
+                            row.getString("segredo_cifrado"),
+                            row.getOffsetDateTime("verificado_em") != null,
                             Set.of(row.getArrayOfStrings("papeis")),
                             Set.of(row.getArrayOfUUIDs("dono")),
                             Set.of(row.getArrayOfUUIDs("funcionario"))
@@ -87,6 +140,8 @@ public class CredentialRepository {
 
                 });
     }
+
+
 
     public Uni<Void> blocksUser (UUID ID, OffsetDateTime blockedUntil) {
 

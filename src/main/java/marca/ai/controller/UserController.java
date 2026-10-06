@@ -1,5 +1,6 @@
 package marca.ai.controller;
 
+import com.fasterxml.jackson.annotation.JsonProperty;
 import io.smallrye.mutiny.Uni;
 import io.vertx.core.http.HttpServerRequest;
 import jakarta.enterprise.context.ApplicationScoped;
@@ -24,7 +25,7 @@ public class UserController {
         this.userService = userService;
     }
 
-    private record userResponse(UUID ID, String message, String totpUri){}
+    private record UserResponse(UUID ID, String message, @JsonProperty("totp_uri") String totpUri){}
 
     @POST
     @Consumes(MediaType.APPLICATION_JSON)
@@ -33,7 +34,7 @@ public class UserController {
 
         return userService.createUser(request, httpRequest.remoteAddress().hostAddress())
                 .map(userResponse -> Response.status(Response.Status.CREATED)
-                        .entity(new userResponse(userResponse.id(), "Usuário criado com sucesso.", userResponse.totpUri()))
+                        .entity(new UserResponse(userResponse.id(), "Usuário criado com sucesso.", userResponse.totpUri()))
                         .build());
     }
 }

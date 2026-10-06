@@ -10,7 +10,11 @@ public enum LoginExceptionType {
     BLOCKED_USER("Acesso bloqueado até %1$td/%1$tm/%1$tY às %1$tHh%1$tM por sucessivas tentativas de login malsucedidas. Se você não reconhece essas tentativas, entre em contato com o suporte.", Response.Status.TOO_MANY_REQUESTS),
     BLOCKED_PERMANENTLY_USER("Acesso bloqueado permanentemente por sucessivas tentativas de login malsucedidas. Se você não reconhece essas tentativas, entre em contato com o suporte.", Response.Status.TOO_MANY_REQUESTS),
     EMAIL_HAS_NOT_BEEN_VERIFIED("O email ainda não foi verificado.", Response.Status.UNAUTHORIZED),
-    INCORRECT_EMAIL_OR_PASSWORD("Email ou senha estão incorretos.", Response.Status.UNAUTHORIZED);
+    INCORRECT_EMAIL_OR_PASSWORD("Email ou senha estão incorretos.", Response.Status.UNAUTHORIZED),
+    INCORRECT_CODE("Código de verificação incorreto.", Response.Status.BAD_REQUEST),
+    USER_NOT_FOUND("Usuário não encontrado",Response.Status.BAD_REQUEST),
+    MAX_ATTEMPTS_MFA("Máximo de tentativas de login com mfa atingidos. Faça o login novamente.", Response.Status.BAD_REQUEST),
+    MFA_CHALLENGE_NOT_FOUND("Verificação expirada ou já utilizada. Faça o login novamente.", Response.Status.UNAUTHORIZED);
 
     private final String message;
 

@@ -1,5 +1,7 @@
 package marca.ai.controller;
 
+import com.fasterxml.jackson.annotation.JsonInclude;
+import com.fasterxml.jackson.annotation.JsonProperty;
 import io.smallrye.mutiny.Uni;
 import io.vertx.ext.web.RoutingContext;
 import jakarta.enterprise.context.ApplicationScoped;
@@ -23,6 +25,10 @@ public class LoginController {
         this.loginService = loginService;
     }
 
+
+    @JsonInclude(JsonInclude.Include.NON_NULL)
+    public record LoginResponse(String uri, @JsonProperty("mfa_active") boolean mfaActive, @JsonProperty("expires_in") long expiresIn, String message) {}
+
     @POST
     @Consumes(MediaType.APPLICATION_JSON)
     @Produces(MediaType.APPLICATION_JSON)
@@ -30,7 +36,7 @@ public class LoginController {
         String ip = routingContext.request().remoteAddress().hostAddress();
         return loginService.login(request, ip)
                 .map(response -> Response.status(Response.Status.OK)
-                        .entity(new LoginResponse(response.token(), response.duration(), response.mfaActive(), "Login concluído com sucesso!"))
+                        .entity(new LoginResponse(response.uri(), response.mfaActive(), response.expiresIn(), "Login concluído com sucesso!"))
                         .build());
     }
 }

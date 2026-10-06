@@ -6,14 +6,22 @@ import io.smallrye.mutiny.Uni;
 import io.smallrye.mutiny.infrastructure.Infrastructure;
 import jakarta.enterprise.context.ApplicationScoped;
 import marca.ai.dto.request.LoginRequest;
+import marca.ai.dto.response.LoginResponse;
 import marca.ai.dto.response.TokenResponse;
+import marca.ai.enums.MFAPurpose;
 import marca.ai.exception.LoginException;
 import marca.ai.exception.type.LoginExceptionType;
 import marca.ai.repository.CredentialRepository;
+import marca.ai.repository.MFAChallengeRepository;
 import marca.ai.repository.redis.FailedAttemptsRepository;
 import marca.ai.utils.CredentialUtils;
+import java.util.Base64;
+import marca.ai.utils.HashUtils;
+import marca.ai.model.LoginModel;
+import marca.ai.utils.StringBuilderUtils;
 
 import java.time.OffsetDateTime;
+import java.util.UUID;
 
 @ApplicationScoped
 public class LoginService {
@@ -22,20 +30,29 @@ public class LoginService {
 
     private static final int MAX_TENTATIVES_FALSE_EMAIL = 120;
 
+    private static final int MFA_INACTIVE_DURATION_SECONDS = 600;
+
+    private static final int MFA_ACTIVE_DURATION_SECONDS = 180;
+
     private final CredentialRepository credentialRepository;
 
     private final TokenService tokenService;
 
     private final FailedAttemptsRepository failedAttemptsRepository;
 
+    private final Aes256GcmService aes256GcmService;
 
-    public LoginService(CredentialRepository credentialRepository, TokenService tokenService, FailedAttemptsRepository failedAttemptsRepository) {
+    private final MFAChallengeRepository mfaChallengeRepository;
+
+    public LoginService(CredentialRepository credentialRepository, TokenService tokenService, FailedAttemptsRepository failedAttemptsRepository, Aes256GcmService aes256GcmService, MFAChallengeRepository mfaChallengeRepository) {
         this.credentialRepository = credentialRepository;
         this.tokenService = tokenService;
         this.failedAttemptsRepository = failedAttemptsRepository;
+        this.aes256GcmService = aes256GcmService;
+        this.mfaChallengeRepository = mfaChallengeRepository;
     }
 
-    public Uni<TokenResponse> login (LoginRequest request, String ip) {
+    public Uni<LoginResponse> login (LoginRequest request, String ip) {
 
         request.validate();
 
@@ -85,7 +102,35 @@ public class LoginService {
                         return failedAttemptsRepository.clearFaults(request.email()).replaceWith(model);
                     });
                 })
-                .chain(model -> tokenService.generateToken(model, request.email()));
+                .chain(model -> {
+
+                    int duration = model.mfaActive() ? MFA_ACTIVE_DURATION_SECONDS : MFA_INACTIVE_DURATION_SECONDS;
+
+                    // O token JWT so nasce no /mfa, depois do codigo conferir. Aqui sai apenas
+                    // o desafio: a prova de que a senha foi verificada agora.
+                    return otpauthUri(model)
+                            .chain(uri -> mfaChallengeRepository.insertMFAChallenge(
+                                            model.ID(),
+                                            MFAPurpose.LOGIN.getPurpose(),
+                                            null,
+                                            HashUtils.sha256Hex(HashUtils.randomToken()),
+                                            OffsetDateTime.now().plusSeconds(duration))
+                                    .replaceWith(new LoginResponse(model.ID(), uri, model.mfaActive(), duration)));
+                });
+    }
+
+    /**
+     * Devolve a otpauth:// para quem ainda nao verificou o fator, ou null se o MFA ja
+     * esta ativo. Decifrar e AES-GCM: trabalho de CPU, nao pode ocupar o event loop.
+     */
+    private Uni<String> otpauthUri (LoginModel model) {
+
+        if (model.mfaActive()) return Uni.createFrom().item(() -> (String) null);
+
+        return Uni.createFrom().item(() -> StringBuilderUtils.buildTotpUri(
+                        Base64.getDecoder().decode(aes256GcmService.decrypt(model.secretCipher(), model.ID().toString())),
+                        model.email()))
+                .runSubscriptionOn(Infrastructure.getDefaultWorkerPool());
     }
 
     private Uni<Boolean> matches(String plain, String hash) {
