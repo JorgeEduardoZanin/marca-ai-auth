@@ -1,18 +1,25 @@
 package marca.ai.dto.response;
 
-import com.fasterxml.jackson.annotation.JsonIgnore;
-import com.fasterxml.jackson.annotation.JsonInclude;
 import com.fasterxml.jackson.annotation.JsonProperty;
 
-@JsonInclude(JsonInclude.Include.NON_NULL)
 public record MFAResponse(
 
-        @JsonProperty("uri")
-        String uri,
+        @JsonProperty("refresh_token")
+        String refreshToken,
 
-        @JsonProperty("mfa_active")
-        boolean mfaActive,
+        @JsonProperty("token")
+        String token,
 
         @JsonProperty("expires_in")
         long expiresIn)
-{}
+{
+
+    public static MFAResponse toMFAResponse (String refreshToken, TokenResponse tokenResponse) {
+
+        return new MFAResponse(
+                refreshToken,
+                tokenResponse.token(),
+                tokenResponse.duration()
+        );
+    }
+}

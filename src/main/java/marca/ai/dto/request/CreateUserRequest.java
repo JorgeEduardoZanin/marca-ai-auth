@@ -30,13 +30,13 @@ public record CreateUserRequest (
         @JsonProperty("password")
         String password,
 
-        @JsonProperty("terms_of_user")
+        @JsonProperty("terms_of_use")
         boolean termsOfUse,
 
         @JsonProperty("privacy_policy")
         boolean privacyPolicy,
 
-        @JsonProperty("termsOfUseVersion")
+        @JsonProperty("terms_of_use_version")
         String termsOfUseVersion,
 
         @JsonProperty("privacy_policy_version")

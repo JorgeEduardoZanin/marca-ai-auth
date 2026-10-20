@@ -4,10 +4,12 @@ import io.smallrye.mutiny.Uni;
 import io.vertx.mutiny.sqlclient.Pool;
 import io.vertx.mutiny.sqlclient.Row;
 import io.vertx.mutiny.sqlclient.Tuple;
+import io.vertx.sqlclient.TransactionPropagation;
 import jakarta.enterprise.context.ApplicationScoped;
 import marca.ai.model.MFAModel;
 
 import java.time.OffsetDateTime;
+import java.util.Set;
 import java.util.UUID;
 
 @ApplicationScoped
@@ -43,57 +45,63 @@ public class MFAChallengeRepository {
                 .replaceWithVoid();
     }
 
-    public Uni<Void> updateMFAChallenge(UUID userID, OffsetDateTime completedOn, int attempts) {
+    public Uni<Void> updateMFAChallenge(String tokenHash, OffsetDateTime completedOn, int attempts) {
 
         String sql = """
                 UPDATE marca_ai_auth.desafio_mfa
                 SET concluido_em = $1,
                     tentativas   = $2
-                WHERE id = (SELECT id
-                            FROM marca_ai_auth.desafio_mfa
-                            WHERE usuario_id = $3 AND concluido_em IS NULL
-                            ORDER BY criado_em DESC
-                            LIMIT 1)
+                WHERE token_hash = $3
                 """;
 
         Tuple params = Tuple.tuple()
                 .addOffsetDateTime(completedOn)
                 .addInteger(attempts)
-                .addUUID(userID);
+                .addString(tokenHash);
 
-        return pool.preparedQuery(sql)
-                .execute(params)
-                .replaceWithVoid();
+        return pool.withTransaction(TransactionPropagation.CONTEXT, connection ->
+                connection.preparedQuery(sql)
+                        .execute(params)
+                        .replaceWithVoid());
     }
 
-    public Uni<MFAModel> findMFAChallenge(UUID ID){
+    public Uni<MFAModel> findMFAChallenge(String tokenHash){
 
         String sql = """
-                SELECT 
-                    dm.finalidade,
-                    dm.token_hash,
+                SELECT
                     dm.tentativas,
-                    dm.expira_em
+                    c.usuario_id,
+                    c.email,
+                    fa.segredo_cifrado,
+                    ARRAY(SELECT p.papel FROM marca_ai_auth.papel_usuario p
+                            WHERE p.usuario_id = c.usuario_id) AS papeis,
+                    ARRAY(SELECT me.empresa_id FROM marca_ai_auth.membro_empresa me
+                            WHERE me.usuario_id = c.usuario_id AND me.papel = 'DONO') AS dono,
+                    ARRAY(SELECT me.empresa_id FROM marca_ai_auth.membro_empresa me
+                            WHERE me.usuario_id = c.usuario_id AND me.papel = 'FUNCIONARIO') AS funcionario
                 FROM marca_ai_auth.desafio_mfa dm
-                WHERE dm.usuario_id = $1
-                  AND dm.concluido_em IS NULL
-                  AND dm.expira_em > now()
-                ORDER BY dm.criado_em DESC
-                LIMIT 1
+                INNER JOIN marca_ai_auth.credencial c ON c.usuario_id = dm.usuario_id
+                INNER JOIN marca_ai_auth.fator_autenticacao fa ON fa.usuario_id = c.usuario_id
+                WHERE dm.token_hash = $1
+                AND dm.concluido_em IS NULL
+                AND dm.expira_em > now()
                 """;
 
         return pool.preparedQuery(sql)
-                .execute(Tuple.of(ID))
+                .execute(Tuple.of(tokenHash))
                 .map(rowSet -> {
                     if (rowSet.size() == 0) return null;
 
                     Row row = rowSet.iterator().next();
 
                     return new MFAModel(
-                            row.getString("finalidade"),
-                            row.getString("token_hash"),
+                            row.getUUID("usuario_id"),
+                            row.getString("email"),
                             row.getInteger("tentativas"),
-                            row.getOffsetDateTime("expira_em")
+                            row.getString("segredo_cifrado"),
+                            Set.of(row.getArrayOfStrings("papeis")),
+                            Set.of(row.getArrayOfUUIDs("dono")),
+                            Set.of(row.getArrayOfUUIDs("funcionario"))
                     );
                 });
 

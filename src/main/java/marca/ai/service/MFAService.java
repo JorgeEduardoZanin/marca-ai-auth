@@ -4,18 +4,23 @@ import com.eatthepath.otp.TimeBasedOneTimePasswordGenerator;
 import io.quarkus.logging.Log;
 import io.smallrye.mutiny.Uni;
 import io.smallrye.mutiny.infrastructure.Infrastructure;
+import io.vertx.mutiny.sqlclient.Pool;
+import io.vertx.sqlclient.TransactionPropagation;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.ws.rs.core.Response;
+import marca.ai.dto.input.RefreshTokenInput;
 import marca.ai.dto.request.MFARequest;
-import marca.ai.dto.response.TokenResponse;
+import marca.ai.dto.response.MFAResponse;
 import marca.ai.exception.InfrastructureException;
 import marca.ai.exception.LoginException;
 import marca.ai.exception.type.InfrastructureExceptionType;
 import marca.ai.exception.type.LoginExceptionType;
-import marca.ai.model.LoginModel;
+import marca.ai.model.MFAModel;
 import marca.ai.repository.AuthFactorRepository;
-import marca.ai.repository.CredentialRepository;
 import marca.ai.repository.MFAChallengeRepository;
+import marca.ai.repository.RefreshTokenRepository;
+import marca.ai.repository.RoleRepository;
+import marca.ai.utils.HashUtils;
 
 import javax.crypto.SecretKey;
 import javax.crypto.spec.SecretKeySpec;
@@ -24,6 +29,7 @@ import java.time.Instant;
 import java.time.OffsetDateTime;
 import java.util.Arrays;
 import java.util.Base64;
+import java.util.UUID;
 
 @ApplicationScoped
 public class MFAService {
@@ -40,7 +46,7 @@ public class MFAService {
 
     private final TimeBasedOneTimePasswordGenerator totp = new TimeBasedOneTimePasswordGenerator();
 
-    private final CredentialRepository credentialRepository;
+    private final Pool pool;
 
     private final Aes256GcmService aes256GcmService;
 
@@ -50,59 +56,71 @@ public class MFAService {
 
     private final MFAChallengeRepository mfaChallengeRepository;
 
-    public MFAService(CredentialRepository credentialRepository, Aes256GcmService aes256GcmService, TokenService tokenService, AuthFactorRepository authFactorRepository, MFAChallengeRepository mfaChallengeRepository) {
-        this.credentialRepository = credentialRepository;
+    private final RefreshTokenRepository refreshTokenRepository;
+
+    private final RoleRepository roleRepository;
+
+    public MFAService(Pool pool, Aes256GcmService aes256GcmService, TokenService tokenService, AuthFactorRepository authFactorRepository, MFAChallengeRepository mfaChallengeRepository, RefreshTokenRepository refreshTokenRepository, RoleRepository roleRepository) {
+        this.pool = pool;
         this.aes256GcmService = aes256GcmService;
         this.tokenService = tokenService;
         this.authFactorRepository = authFactorRepository;
         this.mfaChallengeRepository = mfaChallengeRepository;
+        this.refreshTokenRepository = refreshTokenRepository;
+        this.roleRepository = roleRepository;
     }
 
-    public Uni<TokenResponse> mfa (MFARequest request) {
+    public Uni<MFAResponse> mfa (MFARequest request, String userAgent, String ip) {
 
-        return credentialRepository.login(request.ID())
+        String hashToken = HashUtils.sha256Hex(request.rawToken());
+
+        return mfaChallengeRepository.findMFAChallenge(hashToken)
                 .chain(model -> {
 
                     if (model == null) {
-                        Log.warnf("UUID=%s passou pela uri de mfa mesmo sem existir.", request.ID());
-                        return Uni.createFrom().failure(new LoginException(LoginExceptionType.USER_NOT_FOUND));
+                        Log.warnf("Token de desafio MFA invalido, expirado ou ja utilizado.");
+                        return Uni.createFrom().failure(new LoginException(LoginExceptionType.MFA_CHALLENGE_NOT_FOUND));
                     }
 
-                    return mfaChallengeRepository.findMFAChallenge(request.ID())
-                            .chain(mfaModel -> {
+                    if (model.attempts() >= MAX_ATTEMPTS_MFA) return Uni.createFrom().failure(new LoginException(LoginExceptionType.MAX_ATTEMPTS_MFA));
 
-                                if (mfaModel == null) return Uni.createFrom().failure(new LoginException(LoginExceptionType.MFA_CHALLENGE_NOT_FOUND));
+                    return matchStep(model, request.code())
+                            .chain(step -> {
 
-                                if (mfaModel.attempts() >= MAX_ATTEMPTS_MFA) return Uni.createFrom().failure(new LoginException(LoginExceptionType.MAX_ATTEMPTS_MFA));
+                                if (step == null) return mfaChallengeRepository.updateMFAChallenge(hashToken, null, model.attempts() + 1)
+                                        .chain(() -> Uni.createFrom().failure(new LoginException(LoginExceptionType.INCORRECT_CODE)));
 
-                                return matchStep(model, request.code())
-                                        .chain(step -> {
+                                return authFactorRepository.registerUse(model.ID(), step)
+                                        .chain(accepted -> {
 
-                                            if (step == null) return mfaChallengeRepository.updateMFAChallenge(request.ID(), null, mfaModel.attempts() + 1)
-                                                    .chain(() -> Uni.createFrom().failure(new LoginException(LoginExceptionType.INCORRECT_CODE)));
+                                            if (!accepted) {
+                                                Log.warnf("UUID=%s reapresentou um codigo TOTP ja usado (passo=%d).", model.ID(), step);
+                                                return Uni.createFrom().failure(new LoginException(LoginExceptionType.INCORRECT_CODE));
+                                            }
 
-                                            return authFactorRepository.registerUse(model.ID(), step)
-                                                    .chain(accepted -> {
+                                            return roleRepository.findRole(model.ID())
+                                                    .chain(tokenService::generateToken)
+                                                    .chain(token -> {
 
-                                                        if (!accepted) {
-                                                            Log.warnf("UUID=%s reapresentou um codigo TOTP ja usado (passo=%d).", model.ID(), step);
-                                                            return Uni.createFrom().failure(new LoginException(LoginExceptionType.INCORRECT_CODE));
-                                                        }
+                                                        String randomToken = HashUtils.randomToken();
 
-                                                        return tokenService.generateToken(model, model.email())
-                                                                .call(token -> mfaChallengeRepository.updateMFAChallenge(request.ID(), OffsetDateTime.now(), mfaModel.attempts()));
+                                                        return pool.withTransaction(TransactionPropagation.CONTEXT, tx -> mfaChallengeRepository.updateMFAChallenge(hashToken, OffsetDateTime.now(), model.attempts())
+                                                                        .chain(() -> refreshTokenRepository.insertRefreshToken(RefreshTokenInput.toRefreshTokenInput(
+                                                                                model.ID(),
+                                                                                UUID.randomUUID(),
+                                                                                HashUtils.sha256Hex(randomToken),
+                                                                                OffsetDateTime.now(),
+                                                                                ip,
+                                                                                userAgent
+                                                                        ))))
+                                                                .replaceWith(MFAResponse.toMFAResponse(randomToken, token));
                                                     });
                                         });
                             });
                 });
     }
 
-    /**
-     * Devolve o passo TOTP que bateu, ou null se nenhum da janela conferir.
-     * Roda em worker thread: decifrar (AES-GCM) e gerar o codigo (HMAC) sao
-     * trabalho de CPU e nao podem ocupar o event loop.
-     */
-    private Uni<Long> matchStep (LoginModel model, String code) {
+    private Uni<Long> matchStep (MFAModel model, String code) {
 
         return Uni.createFrom().item(() -> {
             byte[] secret = Base64.getDecoder().decode(

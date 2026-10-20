@@ -105,17 +105,16 @@ public class LoginService {
                 .chain(model -> {
 
                     int duration = model.mfaActive() ? MFA_ACTIVE_DURATION_SECONDS : MFA_INACTIVE_DURATION_SECONDS;
+                    String randomToken = HashUtils.randomToken();
 
-                    // O token JWT so nasce no /mfa, depois do codigo conferir. Aqui sai apenas
-                    // o desafio: a prova de que a senha foi verificada agora.
                     return otpauthUri(model)
                             .chain(uri -> mfaChallengeRepository.insertMFAChallenge(
                                             model.ID(),
                                             MFAPurpose.LOGIN.getPurpose(),
                                             null,
-                                            HashUtils.sha256Hex(HashUtils.randomToken()),
+                                            HashUtils.sha256Hex(randomToken),
                                             OffsetDateTime.now().plusSeconds(duration))
-                                    .replaceWith(new LoginResponse(model.ID(), uri, model.mfaActive(), duration)));
+                            .replaceWith(new LoginResponse(randomToken, uri, model.mfaActive(), duration)));
                 });
     }
 

@@ -17,7 +17,7 @@ public record CNPJResponse(
         String address,
 
         @JsonProperty("numero")
-        String numberAddress,
+        String addressNumber,
 
         @JsonProperty("uf")
         String uf,

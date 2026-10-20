@@ -25,7 +25,7 @@ public class UserController {
         this.userService = userService;
     }
 
-    private record UserResponse(UUID ID, String message, @JsonProperty("totp_uri") String totpUri){}
+    private record UserResponse(String message){}
 
     @POST
     @Consumes(MediaType.APPLICATION_JSON)
@@ -34,7 +34,7 @@ public class UserController {
 
         return userService.createUser(request, httpRequest.remoteAddress().hostAddress())
                 .map(userResponse -> Response.status(Response.Status.CREATED)
-                        .entity(new UserResponse(userResponse.id(), "Usuário criado com sucesso.", userResponse.totpUri()))
+                        .entity(new UserResponse("Usuário criado com sucesso."))
                         .build());
     }
 }

@@ -1,6 +1,7 @@
 package marca.ai.controller;
 
 import io.smallrye.mutiny.Uni;
+import io.vertx.ext.web.RoutingContext;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.ws.rs.Consumes;
 import jakarta.ws.rs.POST;
@@ -24,11 +25,14 @@ public class MFAController {
     @POST
     @Consumes(MediaType.APPLICATION_JSON)
     @Produces(MediaType.APPLICATION_JSON)
-    public Uni<Response> mfa (MFARequest request) {
+    public Uni<Response> mfa (MFARequest request, RoutingContext routingContext) {
 
-        return mfaService.mfa(request)
-                .map(token -> Response.status(Response.Status.OK)
-                        .entity(token)
+        String ip = routingContext.request().remoteAddress().hostAddress();
+        String userAgent = routingContext.request().getHeader("User-Agent");
+
+        return mfaService.mfa(request, userAgent, ip)
+                .map(response -> Response.status(Response.Status.OK)
+                        .entity(response)
                         .build());
     }
 }

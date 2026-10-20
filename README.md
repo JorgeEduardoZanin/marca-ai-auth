@@ -4,8 +4,9 @@ Serviço de autenticação e autorização do MarcaAi. Emite tokens JWT, guarda 
 controla os vínculos entre usuários e empresas e protege o login contra força bruta,
 enumeração de contas e abuso por volume.
 
-> **Estado atual:** cadastro de usuário e login estão implementados e funcionando, com as
-> defesas descritas na §7. Refresh token, verificação de e-mail, recuperação de senha e
+> **Estado atual:** cadastro de usuário, login e publicação do JWKS estão implementados e
+> funcionando, com as defesas descritas na §7. A validação de token já está ligada por
+> política de path (§4). Refresh token, verificação de e-mail, recuperação de senha e
 > convite de funcionário ainda são **desenho pretendido** — as tabelas existem, o código
 > não. As seções marcadas com ✅ descrevem o que está de pé.
 
@@ -47,9 +48,10 @@ enumeração de contas e abuso por volume.
 O acesso a dados é **reativo e por SQL explícito** (`io.vertx.mutiny.sqlclient`), sem ORM.
 Toda query é escrita à mão e retorna `Uni`.
 
-> `quarkus-smallrye-jwt` e `quarkus-security` estão declarados mas ainda sem uso em
-> código — entram quando os endpoints protegidos existirem. A emissão
-> (`smallrye-jwt-build`) essa sim já é usada pelo `TokenService`.
+> `quarkus-smallrye-jwt` já está em uso: a validação roda por política de path (§4) e o
+> serviço verifica os próprios tokens buscando a chave pública no seu JWKS (§6.4). O
+> `quarkus-security` — as anotações `@Authenticated` / `@RolesAllowed` — ainda não aparece
+> em nenhum endpoint; entra quando os fluxos autenticados existirem (§10.2).
 
 ---
 
@@ -140,13 +142,45 @@ real da conexão. **Ajuste a faixa quando houver um proxy real na frente.**
 
 ```properties
 auth.master-key=...              # AES-256 base64 — cifra a chave privada dos JWT
-auth.token.duration=180          # ver §9.1 — a unidade é ambígua hoje
-mp.jwt.verify.issuer=https://marca-ai.com.br/auth
+auth.token.duration=1800         # segundos — 30 min, aplicado com Duration.ofSeconds
 smallrye.jwt.new-token.issuer=https://marca-ai.com.br/auth
+mp.jwt.verify.issuer=https://marca-ai.com.br/auth
+mp.jwt.verify.publickey.location=http://localhost:8081/.well-known/jwks.json
 ```
+
+As duas últimas são o lado **verificador**: o serviço valida os próprios tokens buscando a
+chave pública no seu próprio JWKS (§6.4). Parece circular, mas não é — a busca acontece na
+primeira requisição autenticada, com o servidor já de pé, e fica em cache depois disso.
+
+O `mp.jwt.verify.issuer` precisa ser idêntico ao `smallrye.jwt.new-token.issuer`, aqui e em
+qualquer serviço que consuma esses tokens. Divergência entre os dois rejeita token com
+assinatura perfeitamente válida.
 
 > A `auth.master-key` está versionada em texto claro no `application.properties`. Para
 > produção ela precisa vir de variável de ambiente ou cofre de segredos.
+
+### Políticas de acesso HTTP
+
+```properties
+quarkus.http.auth.permission.public.paths=/login,/mfa,/refresh_token,/user,/.well-known/*
+quarkus.http.auth.permission.public.policy=permit
+
+quarkus.http.auth.permission.private.paths=/*
+quarkus.http.auth.permission.private.policy=authenticated
+```
+
+O default do Quarkus é deixar passar: endpoint sem anotação e sem política nasce aberto, e
+o token nem chega a ser lido. Essa configuração inverte a lógica — fecha `/*` e abre só a
+lista de públicos, que são os fluxos de quem ainda **não tem** token (login, MFA, refresh,
+cadastro) mais o JWKS. Endpoint novo nasce protegido; o esquecimento falha fechando.
+
+O `/user` casa com `/user` exato, não com `/user/{id}`. Então o `POST` de cadastro fica
+aberto e um futuro `PUT /user/{id}` cai no `/*` — que é o desejado, mas por consequência
+dessa regra, não por acaso.
+
+> **Espaço à direita quebra.** Em `.properties` o espaço depois do valor faz parte dele:
+> `policy=permit ` vira a política `"permit "`, que não existe, e a aplicação não sobe —
+> `Unable to find HTTP security policy`. Se o IDE alinhar as colunas do arquivo, desligue.
 
 ---
 
@@ -173,7 +207,7 @@ Doze tabelas no schema `marca_ai_auth` do database `db_marca_ai`.
 
 ```
 usuario_id           uuid PK/FK
-email                varchar(254)  NOT NULL   UNIQUE btree(email) — case-sensitive (§9.5)
+email                varchar(254)  NOT NULL   UNIQUE btree(email) — case-sensitive (§9.4)
 senha_hash           varchar(255)  NOT NULL   BCrypt
 email_verificado_em  timestamptz              nulo = não verificado
 bloqueado_ate        timestamptz              fim do bloqueio; 9999-12-31 = permanente
@@ -253,6 +287,86 @@ segunda `ATIVA`, e o código reconhece o `SQLSTATE` de violação única como ca
 ("outra instância já criou a chave ativa"), não como erro.
 
 **A aplicação não sobe sem chave ativa** — o `StartupEvent` falha explicitamente.
+
+### 6.4 `GET /.well-known/jwks.json` — publicação das chaves públicas
+
+Endpoint anônimo que devolve as chaves `ATIVA` e `ANTERIOR` no formato JWKS (RFC 7517):
+
+```json
+{"keys":[{"kty":"RSA","use":"sig","kid":"2026-w40-94cd","alg":"RS256","n":"ucK2Kcph…","e":"AQAB"}]}
+```
+
+É por aqui que a chave pública chega em quem valida — a alternativa seria copiar um `.pem`
+para dentro de cada consumidor, o que quebraria em toda rotação semanal.
+
+O `TokenService.jwks()` lê as chaves do banco, desempacota o X.509 com `X509EncodedKeySpec`
+e expõe o miolo: `n` (modulus) e `e` (expoente) em Base64URL sem padding. Quem valida refaz
+o caminho inverso e remonta a `RSAPublicKey`. É a mesma chave do `.pem`, sem o envelope
+ASN.1.
+
+Dois detalhes que quebram a validação em silêncio:
+
+- `BigInteger.toByteArray()` devolve o número **com sinal**, então um `0x00` entra na
+  frente sempre que o bit mais alto está ligado — o que é o caso de **todo** modulus RSA,
+  que por construção tem exatamente 2048 bits significativos. Sem remover esse byte o `n`
+  sai com 257 bytes em vez de 256, violando a regra de octetos mínimos da RFC 7518
+  §6.3.1.1. O valor numérico não muda (zero à esquerda não altera magnitude), então parser
+  tolerante aceita, parser estrito rejeita o JWK, e parser que deduz o tamanho da chave
+  pelo comprimento enxerga 2056 bits. É bug de interoperabilidade, não falha garantida —
+  e por isso traiçoeiro: passa no consumidor Java e quebra num cliente JS ou Go.
+- O path é `/.well-known/jwks.json`, registrado na RFC 8615. Qualquer variação resulta em
+  404 do outro lado — e, com a política de `/*` fechada (§4), em exigir token para buscar
+  a chave que valida tokens.
+
+Publicar `ATIVA` **e** `ANTERIOR` é o que torna a rotação (§6.3) invisível: tokens emitidos
+minutos antes da troca carregam o `kid` antigo e seguem válidos até expirarem sozinhos.
+`REVOGADA` fica de fora de propósito — é o botão de pânico, some do JWKS e mata na hora
+todo token assinado com ela.
+
+Nada sensível sai daqui. `n` e `e` são públicos por definição, e o `kid` já viaja em texto
+claro no header de todo JWT emitido. A privada nunca deixa o banco, e lá está cifrada em
+AES-GCM com o `kid` como AAD (§8.3). O risco do JWKS não é confidencialidade, é
+**integridade**: quem conseguir alterar a resposta no caminho injeta a própria chave e
+forja tokens. Em produção, rede interna fechada ou HTTPS com certificado válido.
+
+### 6.5 Como um serviço consumidor valida
+
+Do lado de quem recebe o token não se escreve código de validação. Bastam a extensão e duas
+propriedades:
+
+```xml
+<dependency>
+    <groupId>io.quarkus</groupId>
+    <artifactId>quarkus-smallrye-jwt</artifactId>
+</dependency>
+```
+```properties
+mp.jwt.verify.publickey.location=http://localhost:8081/.well-known/jwks.json
+mp.jwt.verify.issuer=https://marca-ai.com.br/auth
+```
+
+A partir daí o `JWTAuthMechanism` roda **antes** do endpoint: extrai o Bearer, lê o `kid` do
+header, resolve a chave pelo JWKS em cache, confere assinatura, `iss` e `exp`, e monta o
+`SecurityIdentity` com os `groups`. Se qualquer passo falhar, responde 401 sem chamar o
+método. Quando o código do endpoint executa, o token já está verificado.
+
+Sobram três camadas distintas, e só a última é código:
+
+| camada | quem faz |
+|---|---|
+| assinatura, `iss`, `exp` | a extensão, em toda requisição |
+| qual papel pode entrar | `@RolesAllowed` / política de path |
+| se o usuário A pode mexer em B | regra de negócio, no service |
+
+O JWKS fica em cache por instância: `smallrye.jwt.jwks.refresh-interval` (60 min) e
+`smallrye.jwt.jwks.forced-refresh-interval` (30 min — intervalo mínimo entre refreshes
+disparados por `kid` desconhecido). Os defaults bastam para a rotação semanal: o `kid` novo
+chega, o `KeyLocationResolver` levanta `UnmatchedTokenKidException` e rebusca na hora.
+Baixar o `forced-refresh-interval` enfraquece a proteção contra alguém martelar este
+serviço mandando tokens com `kid` aleatório.
+
+> **No `marca-ai` nada disso está feito ainda** — o módulo não tem dependência de segurança
+> nem propriedade `mp.jwt`. É o próximo passo para a validação funcionar fim a fim.
 
 ---
 
@@ -371,7 +485,7 @@ senha errada. Duas exceções conhecidas e aceitas:
 
 - `EMAIL_HAS_NOT_BEEN_VERIFIED` só aparece para conta existente — **decisão de produto**:
   avisar quem esqueceu de verificar vale mais que o sigilo sobre o cadastro existir
-- O BCrypt só roda no ramo em que o usuário existe, então a latência difere (§9.3)
+- O BCrypt só roda no ramo em que o usuário existe, então a latência difere (§9.2)
 
 ---
 
@@ -409,24 +523,7 @@ decifra, porque o `usuario_id` não bate.
 
 ## 9. Pendências conhecidas
 
-### 9.1 A unidade de `auth.token.duration` é ambígua
-
-```properties
-auth.token.duration=180
-```
-```java
-.expiresIn(Duration.ofMinutes(duration))      // 180 minutos = 3 horas
-return new TokenResponse(token, duration);    // devolve 180 cru ao cliente
-```
-
-O JWT vale 3 horas, mas o cliente recebe `180` sem unidade e, pela convenção de
-`expires_in`, vai ler como 180 **segundos**. Resolver nomeando a unidade
-(`auth.token-duration-minutes`) ou guardando em segundos com `Duration.ofSeconds`.
-
-TTL curto é a defesa mais barata contra token vazado — e a única que funciona antes de
-existir revogação.
-
-### 9.2 MFA provisionado mas não exigido
+### 9.1 MFA provisionado mas não exigido
 
 O cadastro gera e cifra o segredo TOTP, o login calcula `mfa_ativo` e carrega no
 `LoginModel`... e **nada consulta esse campo**. Conta com segundo fator configurado e
@@ -437,13 +534,13 @@ estão vazias de uso.
 uma vez por conta, de muitos IPs. Nenhuma das três camadas da §7 acende nesse ataque, e
 nenhum contador acenderia: cada tentativa isolada é indistinguível de um login legítimo.
 
-### 9.3 Tempo de resposta denuncia conta existente
+### 9.2 Tempo de resposta denuncia conta existente
 
 `BcryptUtil.matches` só é chamado quando o usuário existe. Mesmo com mensagens idênticas, a
 diferença de latência separa os dois casos. A correção é comparar contra um hash dummy no
 ramo `model == null`.
 
-### 9.4 `clearBlocksUser` sem chamador
+### 9.3 `clearBlocksUser` sem chamador
 
 O SQL está correto, mas nada chama. O uso previsto é desbloqueio administrativo de quem
 levou `PERMANENT_BLOCK` — e esse endpoint precisa limpar **os dois lados**:
@@ -457,7 +554,7 @@ Sem o segundo passo, o contador continua em 20 com TTL de 7 dias. A próxima fal
 21, que cai no `default -> null` da escalada, e a conta fica **sem bloqueio nenhum** até o
 contador expirar.
 
-### 9.5 E-mail é case-sensitive
+### 9.4 E-mail é case-sensitive
 
 O índice é `UNIQUE btree(email)`, sem `lower()`, e o login busca com `WHERE c.email = $1`.
 Consequência: `Joao@teste.com` e `joao@teste.com` são contas **diferentes** — ambas podem
@@ -468,14 +565,16 @@ endereço em maiúsculas devolve zero linhas.
 A correção é normalizar na entrada (`email.toLowerCase()` no cadastro e no login) e trocar
 o índice por `UNIQUE (lower(email))`, que impede o cadastro duplicado no banco.
 
-### 9.6 Menores
+### 9.5 Menores
 
 - `Retry-After` ausente na resposta 429 do `MiddlewareExceptionHandler`
 - A chave `login:failures:ip:` guarda a contagem de todas as requisições de todos os
   endpoints — não são falhas, nem são de login
 - `CredentialUtils`: construtor `public` em classe utilitária; constante `fourteen` vale 15
 - Imports não usados: `LocalDateTime` em `LoginService`, `org.jose4j.http.Response` em
-  `IpRateLimitFilter`
+  `IpRateLimitFilter`, `java.security.Key` em `TokenService`
+- `JwksController`: `@Consumes` num `@GET`, que não tem corpo
+- `TokenService.parsePublicKey` é `public` sem ser chamado de fora
 
 ---
 
@@ -498,9 +597,12 @@ O `01-schema.sql` vira `src/main/resources/db/migration/V1__init.sql`.
 - Verificação de e-mail e recuperação de senha (`token_uso_unico` já existe)
 - Refresh token com rotação e detecção de reuso (`refresh_token` já existe)
 - Convite e ativação de funcionário
-- `GET /.well-known/jwks.json` publicando as públicas `ATIVA` + `ANTERIOR`
-- Endpoints protegidos com `@RolesAllowed` — aí `quarkus-smallrye-jwt` e
-  `quarkus-security` saem do papel
+- Edição e exclusão de usuário — os primeiros endpoints autenticados. A identidade sai do
+  `sub` do token, não de um `{id}` na URL: sem campo por onde pedir outro usuário, editar
+  conta alheia fica estruturalmente impossível, sem `if` para esquecer
+- Troca de senha e de e-mail exigindo a senha atual mesmo com token válido — o token vale
+  30 minutos e pode ter saído de uma sessão que já se quer cortar
+- Consumo dos tokens no `marca-ai` (§6.5): dependência, propriedades e anotações
 
 ### 10.3 Revogação de token
 

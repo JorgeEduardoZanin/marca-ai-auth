@@ -7,7 +7,13 @@ import io.vertx.mutiny.sqlclient.SqlConnection;
 import io.vertx.mutiny.sqlclient.Tuple;
 import io.vertx.sqlclient.TransactionPropagation;
 import jakarta.enterprise.context.ApplicationScoped;
+import marca.ai.model.JwksModel;
 import marca.ai.model.SignatureKeyModel;
+
+import java.util.ArrayList;
+import java.util.Collection;
+import java.util.Collections;
+import java.util.List;
 
 @ApplicationScoped
 public class SignatureKeyRepository {
@@ -95,5 +101,33 @@ public class SignatureKeyRepository {
                             row.getString("chave_privada_cifrada")
                     );
                 });
+    }
+
+    public Uni<List<JwksModel>> findPublicKey () {
+
+        String sql = """
+                SELECT
+                    ca.kid, 
+                    ca.chave_publica
+                FROM marca_ai_auth.chave_assinatura ca
+                WHERE ca.status IN ('ATIVA', 'ANTERIOR')
+                """;
+
+        return pool.preparedQuery(sql)
+                .execute()
+                .map(rowSet -> {
+                    if (rowSet.size() == 0) return Collections.emptyList();
+
+                    List<JwksModel> resp = new ArrayList<>(rowSet.size());
+
+                    for (Row row : rowSet) {
+                        resp.add(new JwksModel(
+                                row.getString("kid"),
+                                row.getString("chave_publica")
+                        ));
+                    }
+                    return resp;
+                });
+
     }
 }

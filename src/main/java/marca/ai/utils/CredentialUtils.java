@@ -11,7 +11,7 @@ public final class CredentialUtils {
 
     private static final int eleven = 11;
 
-    private static final int fourteen = 15;
+    private static final int fourteen = 14;
 
     private static final int seventeen = 17;
 

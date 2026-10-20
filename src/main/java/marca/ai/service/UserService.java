@@ -13,12 +13,10 @@ import jakarta.enterprise.context.ApplicationScoped;
 
 import jakarta.ws.rs.core.Response;
 import marca.ai.dto.request.CreateUserRequest;
-import marca.ai.dto.response.CreateUserResponse;
 import marca.ai.exception.InfrastructureException;
 import marca.ai.exception.mapper.ExceptionMapper;
 import marca.ai.exception.type.InfrastructureExceptionType;
 import marca.ai.repository.*;
-import marca.ai.utils.StringBuilderUtils;
 
 import javax.crypto.KeyGenerator;
 import javax.crypto.SecretKey;
@@ -58,7 +56,7 @@ public class UserService {
         this.authFactorRepository = authFactorRepository;
     }
 
-    public Uni<CreateUserResponse> createUser (CreateUserRequest request, String ip) {
+    public Uni<Void> createUser (CreateUserRequest request, String ip) {
 
         request.validate();
         request.validateContent();
@@ -90,10 +88,8 @@ public class UserService {
                                 return Uni.createFrom().failure(new InfrastructureException(InfrastructureExceptionType.UNKNOWN_INFRASTRUCTURE_ERROR, Response.Status.INTERNAL_SERVER_ERROR));
                             }
 
-                            String totpUri = StringBuilderUtils.buildTotpUri(secret, request.email());
-
                             return authFactorRepository.insertAuthFactor(userID, aes256GcmService.encrypt(Base64.getEncoder().encodeToString(secret), userID.toString()))
-                                    .replaceWith(new CreateUserResponse(userID, totpUri));
+                                    .replaceWithVoid();
 
                         })))
                 .onFailure(PgException.class).transform(ExceptionMapper::fromPgException);

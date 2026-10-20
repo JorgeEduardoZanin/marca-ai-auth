@@ -1,13 +1,13 @@
 package marca.ai.dto.response;
 
 import com.fasterxml.jackson.annotation.JsonProperty;
-import jakarta.json.Json;
 
 import java.util.UUID;
 
 public record LoginResponse(
 
-        UUID id,
+        @JsonProperty("raw_token")
+        String rawToken,
 
         @JsonProperty("uri")
         String uri,
